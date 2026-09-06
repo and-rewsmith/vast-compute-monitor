@@ -93,7 +93,7 @@ body {
 .seg-btn.on { background: #1f6feb33; color: var(--accent); }
 
 /* ---- charts ------------------------------------------------------------- */
-.chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.chart-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; align-items: start; }
 .tchart { position: relative; width: 100%; }
 .tchart svg { display: block; width: 100%; }
 .tchart-axis { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
@@ -217,6 +217,7 @@ body {
   .app { zoom: 1; padding: 10px 10px 24px; }
   .topbar { flex-wrap: wrap; gap: 8px 12px; }
   .chart-row { grid-template-columns: 1fr; }
+  .spend-row { grid-template-columns: 1fr; }
   .summary-row { grid-template-columns: 1fr; }
   .mini-table { min-width: 900px; }
 }
@@ -270,7 +271,7 @@ body {
 }
 
 /* ---- spend ---------------------------------------------------------------- */
-.spend-row { display: grid; grid-template-columns: 1.5fr 1fr; gap: 14px; align-items: start; }
+.spend-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .spend-key { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 6px; }
 .key-swatch { width: 14px; height: 9px; border-radius: 2px; display: inline-block; margin-left: 8px; }
 .key-swatch:first-child { margin-left: 0; }

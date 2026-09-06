@@ -16,7 +16,6 @@ the data source:
 from __future__ import annotations
 
 import asyncio
-import datetime
 import json
 import os
 import time
@@ -293,23 +292,6 @@ async def history(
     return JSONResponse(data)
 
 
-def _period_bounds(now: float) -> dict[str, tuple[float, float]]:
-    """Local-clock boundaries for the ledger's periods.
-
-    Local, not UTC: "today" has to mean the day the reader is having, or the
-    number is quietly answering a different question than the one being asked.
-    """
-    local = datetime.datetime.fromtimestamp(now).astimezone()
-    hour = local.replace(minute=0, second=0, microsecond=0)
-    day = hour.replace(hour=0)
-    week = day - datetime.timedelta(days=day.weekday())  # Monday
-    return {
-        "hour": (hour.timestamp(), (hour + datetime.timedelta(hours=1)).timestamp()),
-        "day": (day.timestamp(), (day + datetime.timedelta(days=1)).timestamp()),
-        "week": (week.timestamp(), (week + datetime.timedelta(days=7)).timestamp()),
-    }
-
-
 def _trailing_burn(now: float) -> dict:
     """Realized dollars/hour over the trailing window: min, max and mean.
 
@@ -343,58 +325,26 @@ def _trailing_burn(now: float) -> dict:
 
 @app.get("/api/spend")
 async def spend(minutes: float = Query(1440.0, gt=0, le=60 * 24 * 90)) -> JSONResponse:
-    """The ledger: realized spend per period, plus what can honestly be said
-    about the rest of each period.
-
-    Every period is split into ACTUAL and REMAINDER and never blended into one
-    number. `coverage` says how much of the period we actually observed, so a
-    "this week" figure assembled from four hours of data can be shown as the
-    fragment it is instead of a confident under-count.
-    """
+    """Spend over the requested window: per-branch rates, realized burn, and the
+    account-wide totals the two spend charts need."""
     assert store is not None
     now = time.time()
 
     def _run() -> dict:
-        bounds = _period_bounds(now)
         trailing = _trailing_burn(now)
         extent = store.account_extent()
-
-        periods = []
-        for key, (start, end) in bounds.items():
-            window = store.account_spend(start, now)
-            period_s = end - start
-            remaining_s = max(0.0, end - now)
-            # Forecasting is offered only for the current hour and day. A week
-            # projected from a few hours of history is a fabrication, and putting
-            # it in the same table as a measured number lends it that number's
-            # credibility -- so it is simply not produced.
-            project = period_s <= 86400.0 and trailing["lo"] is not None
-            periods.append(
-                {
-                    "key": key,
-                    "start": start,
-                    "end": end,
-                    "elapsed_s": now - start,
-                    "remaining_s": remaining_s,
-                    "period_s": period_s,
-                    "actual": window["spent"],
-                    "coverage": window["coverage"],
-                    "samples": window["samples"],
-                    "project": project,
-                    "remainder_lo": (trailing["lo"] * remaining_s / 3600.0) if project else None,
-                    "remainder_hi": (trailing["hi"] * remaining_s / 3600.0) if project else None,
-                }
-            )
-
         series = store.branch_history(minutes, 240)
         history = store.account_spend(now - minutes * 60.0, now)
         return {
             "now": now,
             "tracking_since": extent,
             "trailing_burn": trailing,
-            "periods": periods,
-            # Per-branch $/hr over the window -- the attributable estimate,
-            # stacked in the chart.
+            # Scoped to the REQUESTED WINDOW, not to a clock period. Reporting
+            # "this hour" against a store only minutes old produced a true
+            # number under a label implying a full hour -- exactly backwards.
+            "window_spent": history["spent"],
+            "window_coverage": history["coverage"],
+            # Per-branch $/hr over the window -- the attributable estimate.
             "branch_series": series["series"],
             "start": series["start"],
             "end": series["end"],

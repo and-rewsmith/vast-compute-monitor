@@ -129,6 +129,8 @@ export interface BranchPoint {
   gpus: number;
   gpu_util: number | null;
   cpu_util: number | null;
+  // Pooled across the branch's workers: total VRAM held over total allotted.
+  vram_percent: number | null;
   dph_total: number | null;
 }
 
@@ -138,25 +140,6 @@ export interface BranchHistory {
   minutes: number;
   bucket_s: number;
   series: Record<string, BranchPoint[]>;
-}
-
-// One row of the ledger. ACTUAL and REMAINDER are kept apart on purpose and are
-// never summed into a single figure: one is measured, the other is an estimate,
-// and rendering them as one number lends the estimate the measurement's
-// credibility. `project` is false where a forecast would be a fabrication.
-export interface SpendPeriod {
-  key: "hour" | "day" | "week";
-  start: number;
-  end: number;
-  elapsed_s: number;
-  remaining_s: number;
-  period_s: number;
-  actual: number;
-  coverage: number;
-  samples: number;
-  project: boolean;
-  remainder_lo: number | null;
-  remainder_hi: number | null;
 }
 
 export interface TrailingBurn {
@@ -171,12 +154,14 @@ export interface Spend {
   now: number;
   tracking_since: number | null;
   trailing_burn: TrailingBurn;
-  periods: SpendPeriod[];
+  // Realized spend over the requested window -- not a clock period.
+  window_spent: number;
+  window_coverage: number;
   branch_series: Record<string, BranchPoint[]>;
   start: number;
   end: number;
   bucket_s: number;
-  account_burn: { ts: number; burn_hr: number }[];
+  account_burn: { ts: number; burn_hr: number; cum: number | null }[];
 }
 
 export interface BranchCost {

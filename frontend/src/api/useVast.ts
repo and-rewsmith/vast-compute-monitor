@@ -209,6 +209,7 @@ export function useBranchHistory(minutes: number, snapshot: Snapshot | null, ena
           // the CPU series is computed here from the instances in this branch --
           // GPU-weighted, matching how the server aggregates it.
           cpu_util: weightedCpu(snapshot, b.ids),
+          vram_percent: pooledVram(snapshot, b.ids),
           dph_total: b.dph_total,
         };
         series[b.branch] = (series[b.branch] ?? []).concat(point);
@@ -218,6 +219,20 @@ export function useBranchHistory(minutes: number, snapshot: Snapshot | null, ena
   }, [snapshot?.ts, history !== null, enabled]);
 
   return { history, loading, refetch };
+}
+
+// Pooled, matching how the server aggregates it: total VRAM held over total
+// allotted, so a nearly-full worker is not averaged away by an empty one.
+function pooledVram(snapshot: Snapshot, ids: number[]): number | null {
+  let used = 0;
+  let total = 0;
+  for (const id of ids) {
+    const inst = snapshot.instances.find((i) => i.id === id);
+    if (!inst || inst.vram_used_gb == null || !inst.vram_total_gb) continue;
+    used += inst.vram_used_gb;
+    total += inst.vram_total_gb;
+  }
+  return total ? (100 * used) / total : null;
 }
 
 function weightedCpu(snapshot: Snapshot, ids: number[]): number | null {

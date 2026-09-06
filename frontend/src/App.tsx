@@ -10,12 +10,12 @@ import {
   type GroupMode,
 } from "./api/useVast";
 import type { BranchPoint, HistoryPoint, Instance } from "./types";
-import { ago, pct, seriesColor, usd } from "./format";
+import { ago, gb, pct, seriesColor, usd } from "./format";
 import { TimeChart, type ChartSeries } from "./components/TimeChart";
 import { Legend } from "./components/Legend";
 import { BranchRail } from "./components/BranchRail";
 import { SpendChart } from "./components/SpendChart";
-import { Ledger } from "./components/Ledger";
+import { CumulativeSpend } from "./components/CumulativeSpend";
 import { InstanceCard } from "./components/InstanceCard";
 import { InstanceTable } from "./components/InstanceTable";
 
@@ -85,7 +85,7 @@ export default function App() {
   const loading = group === "branch" ? branchHistory.loading : instHistory.loading;
 
   // Chart series: by branch (default) or by instance.
-  const makeSeries = (field: "gpu_util" | "cpu_util"): ChartSeries[] => {
+  const makeSeries = (field: "gpu_util" | "cpu_util" | "vram_percent"): ChartSeries[] => {
     if (group === "branch") {
       const series = branchHistory.history?.series ?? {};
       return Object.keys(series)
@@ -108,13 +108,27 @@ export default function App() {
           key: String(id),
           label: inst ? `${id} - ${branchOf(inst)}` : String(id),
           color: colorForInstance(id),
-          points: (series[String(id)] ?? []).map((p: HistoryPoint) => ({ ts: p.ts, v: p[field] })),
+          points: (series[String(id)] ?? []).map((p: HistoryPoint) => ({
+            ts: p.ts,
+            // Instance history stores VRAM in gigabytes, so the percentage is
+            // derived here rather than stored twice.
+            v:
+              field === "vram_percent"
+                ? p.vram_used_gb != null && p.vram_total_gb
+                  ? (100 * p.vram_used_gb) / p.vram_total_gb
+                  : null
+                : p[field],
+          })),
         };
       });
   };
 
   const gpuSeries = useMemo(
     () => makeSeries("gpu_util"),
+    [group, branchHistory.history, instHistory.history, instances],
+  );
+  const vramSeries = useMemo(
+    () => makeSeries("vram_percent"),
     [group, branchHistory.history, instHistory.history, instances],
   );
   const cpuSeries = useMemo(
@@ -243,6 +257,24 @@ export default function App() {
             </div>
             <div className="card">
               <div className="card-head">
+                <span className="card-title">VRAM utilization - {windowLabel}</span>
+                <span className="head-right muted small">
+                  {gb(snapshot.fleet.vram_used_gb)} / {gb(snapshot.fleet.vram_total_gb)} pooled
+                </span>
+              </div>
+              <Legend items={legendItems} />
+              <TimeChart
+                series={vramSeries}
+                start={chartStart}
+                end={chartEnd}
+                windowMinutes={minutes}
+                yMax={100}
+                yFormat={(v) => `${Math.round(v)}%`}
+                dimmed={loading}
+              />
+            </div>
+            <div className="card">
+              <div className="card-head">
                 <span className="card-title">CPU utilization - {windowLabel}</span>
                 <span className="head-right muted small">
                   avg {pct(snapshot.fleet.avg_cpu_util)} across {snapshot.fleet.running} running
@@ -264,8 +296,12 @@ export default function App() {
           <section className="spend-row">
             <div className="card">
               <div className="card-head">
-                <span className="card-title">Spend - {windowLabel}</span>
-                <span className="head-right muted small">$/hr, stacked by branch</span>
+                <span className="card-title">Spend per hour - {windowLabel}</span>
+                <span className="head-right muted small">
+                  {spend?.trailing_burn.mean != null
+                    ? `Vast is charging ${usd(spend.trailing_burn.mean)}/hr`
+                    : `listed ${usd(snapshot.fleet.dph_total)}/hr`}
+                </span>
               </div>
               {spend ? (
                 <SpendChart spend={spend} colorFor={colorForBranch} windowMinutes={minutes} />
@@ -273,9 +309,20 @@ export default function App() {
                 <div className="muted small">Collecting spend samples</div>
               )}
             </div>
-            <Ledger spend={spend} snapshot={snapshot} now={now} />
+            <div className="card">
+              <div className="card-head">
+                <span className="card-title">Cumulative spend - {windowLabel}</span>
+                <span className="head-right muted small">
+                  {spend ? `${usd(spend.window_spent, 2)} charged in this window` : ""}
+                </span>
+              </div>
+              {spend ? (
+                <CumulativeSpend spend={spend} colorFor={colorForBranch} windowMinutes={minutes} />
+              ) : (
+                <div className="muted small">Collecting spend samples</div>
+              )}
+            </div>
           </section>
-
 
           <section className="inst-groups">
             {grouped.length === 0 ? (

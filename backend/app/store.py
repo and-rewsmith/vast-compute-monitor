@@ -257,7 +257,9 @@ class Store:
                          / NULLIF(SUM(CASE WHEN gpu_util IS NOT NULL THEN w END), 0) AS gpu_util,
                        SUM(CASE WHEN cpu_util IS NOT NULL THEN cpu_util * w END)
                          / NULLIF(SUM(CASE WHEN cpu_util IS NOT NULL THEN w END), 0) AS cpu_util,
-                       SUM(dph) AS dph_total
+                       SUM(dph) AS dph_total,
+                       SUM(vram_used) AS vram_used_gb,
+                       SUM(vram_total) AS vram_total_gb
                   FROM (
                         SELECT COALESCE(label, :unlabeled) AS label,
                                instance_id,
@@ -266,6 +268,8 @@ class Store:
                                AVG(gpu_util) AS gpu_util,
                                AVG(cpu_util) AS cpu_util,
                                AVG(dph_total) AS dph,
+                               AVG(vram_used_gb) AS vram_used,
+                               AVG(vram_total_gb) AS vram_total,
                                COALESCE(MAX(num_gpus), 1) AS w
                           FROM samples
                          WHERE ts >= :start
@@ -287,6 +291,14 @@ class Store:
                     "gpu_util": row["gpu_util"],
                     "cpu_util": row["cpu_util"],
                     "dph_total": row["dph_total"],
+                    # Pooled, not averaged: a branch's VRAM pressure is the
+                    # total it is holding over the total it was given, so a
+                    # nearly-full worker is not hidden by an empty one.
+                    "vram_percent": (
+                        100.0 * row["vram_used_gb"] / row["vram_total_gb"]
+                        if row["vram_used_gb"] is not None and row["vram_total_gb"]
+                        else None
+                    ),
                 }
             )
 
@@ -372,6 +384,7 @@ class Store:
         burn: list[dict] = []
         acc_spend = 0.0
         acc_dt = 0.0
+        running = 0.0
         for r in rows:
             if r["d"] is None or r["dt"] is None or r["dt"] <= 0:
                 continue
@@ -385,10 +398,19 @@ class Store:
                 # take the dashboard down over a bookkeeping adjustment.
                 continue
             spent += -r["d"]
+            running += -r["d"]
             acc_spend += -r["d"]
             acc_dt += r["dt"]
             if acc_dt >= MIN_BURN_DT:
-                burn.append({"ts": r["ts"], "burn_hr": (acc_spend / acc_dt) * 3600.0})
+                burn.append(
+                    {
+                        "ts": r["ts"],
+                        "burn_hr": (acc_spend / acc_dt) * 3600.0,
+                        # Dollars actually charged since the start of the window,
+                        # for the cumulative chart's ground-truth line.
+                        "cum": running,
+                    }
+                )
                 acc_spend = 0.0
                 acc_dt = 0.0
 

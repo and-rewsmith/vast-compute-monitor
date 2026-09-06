@@ -33,12 +33,14 @@ branch is the unit of display and of cost attribution throughout.
   GPU-weighted utilization, and cost to date. Finished branches keep their band
   and their final cost, which is the retrospective the persisted history exists
   for.
-- **GPU and CPU utilization over time**, one line per branch by default (toggle
-  to per-instance), with a selectable window, crosshair tooltip and legend.
-- **Spend over time** — $/hr stacked by branch, with a `now` rule: solid to the
+- **GPU, VRAM and CPU utilization over time**, one line per branch by default
+  (toggle to per-instance), with a selectable window, crosshair tooltip and
+  legend. Branch VRAM is pooled — total held over total allotted — so a
+  nearly-full worker is not averaged away by an empty one.
+- **Spend per hour** — $/hr stacked by branch, with a `now` rule: solid to the
   left, hatched projection wedge to the right. See "Actual versus projected".
-- **Ledger** — every period split into ACTUAL and REMAINDER, never blended, with
-  a coverage meter saying how much of the period was really observed.
+- **Cumulative spend** — dollars so far across the window, stacked by branch,
+  with what Vast actually charged drawn over it.
 - **Per-instance cards**, grouped under their branch — GPU and VRAM dials,
   temperature, CPU, RAM, disk, sparklines, cost, uptime, location, SSH, image.
 - **A sortable table** of every rented instance, Branch first, which doubles as
@@ -66,20 +68,18 @@ polls aliases against Vast's own update schedule — consecutive readings measur
 $1.30/hr then $2.90/hr while the true rate was a steady $2.26/hr. Neither was
 wrong; they straddled an upstream update.
 
-Forecasting rules, which exist because a confident-looking number beside a
-measured one borrows its credibility:
+Both spend charts are scoped to the **selected window**, never to a clock
+period. An earlier version reported "this hour" against a store that had been
+running only a few minutes: the number was arithmetically correct but sat under
+a label implying a full hour of coverage, so it read as far too small for the
+fleet. The window is now stated on the axis and in the card header, and the two
+cannot disagree.
 
-- Every period shows **actual + remainder** as two figures. Actual wears the
-  strong ink; the remainder stays recessive.
-- The remainder is a **range**, from the trailing realized burn's low and high —
-  never the instantaneous sum of prices, which is a step function that jumps the
-  moment a worker is created or destroyed.
-- **Nothing beyond a day is projected.** A week extrapolated from hours of
-  history is a guess wearing a measurement's clothes, so it is simply not shown.
-- A **coverage meter** marks any period that predates monitoring, so a fragment
-  reads as a fragment rather than a confident under-count.
-- On the chart the projection is a hatched **wedge** between the low and high
-  burn, never a line: the spread is the honest content of the estimate.
+The only forecast is the hatched **wedge** on the per-hour chart, drawn between
+the low and high of the trailing realized burn — a wedge rather than a line
+because the spread is the honest content of the estimate. It is never the
+instantaneous sum of prices, which is a step function that jumps the moment a
+worker is created or destroyed.
 
 Runway is deliberately absent. With autobill on, credit is a sawtooth and
 "hours until zero" answers nothing.
