@@ -1,0 +1,23 @@
+# Python
+backend/.venv/
+backend/server.pid
+__pycache__/
+*.pyc
+
+# Node / frontend build
+frontend/node_modules/
+frontend/*.tsbuildinfo
+# frontend/dist/ is intentionally COMMITTED so the systemd service can serve the
+# UI straight from a clone without needing Node on the box. Rebuild after UI
+# edits with `npm --prefix frontend run build` (or ./up.sh --build).
+
+# Runtime state: SQLite time-series DB + service logs. Machine-local, never
+# committed -- the whole point of the store is that it accumulates locally.
+state/
+
+# Secrets: the Vast API key is read from ~/.config/vastai/vast_api_key or the
+# VAST_API_KEY env var. Never checked in.
+.env
+vast_api_key
+
+.DS_Store
