@@ -41,10 +41,11 @@ branch is the unit of display and of cost attribution throughout.
   a coverage meter saying how much of the period was really observed.
 - **Per-instance cards**, grouped under their branch — GPU and VRAM dials,
   temperature, CPU, RAM, disk, sparklines, cost, uptime, location, SSH, image.
-- **Fleet roll-up** and **idle spend**: what you pay per hour for GPUs reporting
-  under 5% utilization.
 - **A sortable table** of every rented instance, Branch first, which doubles as
   the no-hover/accessible view of everything the charts plot.
+
+Every chart and sparkline follows the window selector, up to **30d** — the same
+as the store's retention, so the selector reaches everything that is kept.
 
 ## Actual versus projected
 
@@ -176,7 +177,12 @@ chart ramps, and band-compliant colors measure ~2.6:1 on this surface, too dim t
 read at a glance. Identity is never carried by color alone: every chart has a
 legend, direct end-labels, and the table view.
 
-Utilization of rented compute uses an **inverted** color scale — green when high,
-red when low — because a GPU pinned at 99% is what you are paying for and one at
-3% is money leaking. VRAM, RAM and disk keep the normal scale, where full is the
-thing to worry about.
+Utilization colour is used in exactly one place: the branch rail, where green
+means the branch is working and red means it is idling on your money. That is an
+inverted scale on purpose — a GPU pinned at 99% is the outcome you are paying
+for.
+
+Per-instance readings — the cards and the table — are deliberately left
+**uncoloured**. A wall of green/amber/red cells reads as a verdict on every
+number and drowns the one place the signal actually matters. Instance gauges take
+their branch's colour instead, so the arc marks identity rather than judgement.

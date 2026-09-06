@@ -314,12 +314,6 @@ body {
 
 @media (max-width: 900px) {
   .spend-row { grid-template-columns: 1fr; }
-  .fleet-inner { flex-direction: column; align-items: stretch; gap: 12px; }
-  .fleet-card .gpu-gauges { justify-content: space-around; }
-  .fleet-card .gpu-stats {
-    padding-left: 0; padding-top: 10px;
-    border-left: none; border-top: 1px solid var(--border);
-  }
   .branch-body { grid-template-columns: 1fr; align-items: start; gap: 8px; }
   .branch-cost { align-items: flex-start; }
 }
@@ -329,12 +323,3 @@ body {
    full-width card lose their relationship to each other. */
 .branch-util { max-width: 560px; }
 .branch-unlabeled { border-left-style: dashed; }
-/* Fleet reads as one strip: dials on the left, the secondary numbers beside
-   them behind a rule. Two centred rows in a full-width card left most of the
-   card empty and broke the relationship between the two groups. */
-.fleet-inner { display: flex; align-items: center; gap: 28px; }
-.fleet-card .gpu-gauges { flex: 0 0 auto; gap: 18px; justify-content: flex-start; }
-.fleet-card .gpu-stats {
-  flex: 1; margin-top: 0; padding-top: 0; padding-left: 28px;
-  border-top: none; border-left: 1px solid var(--border);
-}

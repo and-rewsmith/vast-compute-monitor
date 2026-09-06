@@ -1,15 +1,13 @@
 import type { HistoryPoint, Instance } from "../types";
-import { ago, duration, gb, loadColor, pct, rate, tempColor, usd, utilColor } from "../format";
+import { ago, duration, gb, pct, rate, usd } from "../format";
 import { Gauge } from "./Gauge";
 import { Sparkline } from "./Sparkline";
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="stat">
       <div className="stat-label">{label}</div>
-      <div className="stat-value" style={color ? { color } : undefined}>
-        {value}
-      </div>
+      <div className="stat-value">{value}</div>
     </div>
   );
 }
@@ -80,10 +78,11 @@ export function InstanceCard({
           value={lastGpu}
           label={gpuStale && gpuAge != null ? `GPU · ${ago(gpuAge)}` : "GPU compute"}
           stale={gpuStale}
-          colorFn={utilColor}
+          colorFn={() => color}
         />
         <Gauge
           value={inst.vram_percent}
+          colorFn={() => color}
           label="VRAM"
           sublabel={`${gb(inst.vram_used_gb)} / ${gb(inst.vram_total_gb)}`}
         />
@@ -92,12 +91,11 @@ export function InstanceCard({
       <div className="gpu-stats">
         <Stat
           label="GPU temp"
-          value={inst.gpu_temp_c != null ? `${Math.round(inst.gpu_temp_c)}°C` : "—"}
-          color={tempColor(inst.gpu_temp_c)}
+          value={inst.gpu_temp_c != null ? `${Math.round(inst.gpu_temp_c)}\u00b0C` : "\u2014"}
         />
-        <Stat label="CPU" value={pct(inst.cpu_util)} color={utilColor(inst.cpu_util)} />
-        <Stat label="RAM" value={pct(inst.ram_percent)} color={loadColor(inst.ram_percent)} />
-        <Stat label="Disk" value={pct(inst.disk_percent)} color={loadColor(inst.disk_percent)} />
+        <Stat label="CPU" value={pct(inst.cpu_util)} />
+        <Stat label="RAM" value={pct(inst.ram_percent)} />
+        <Stat label="Disk" value={pct(inst.disk_percent)} />
       </div>
 
       <div className="inst-sparks">

@@ -8,8 +8,9 @@ interface Props {
   // When the reading is stale (the host skipped a report), the arc is drawn
   // faded so the number is visibly "last known", not "current".
   stale?: boolean;
-  // Which colour scale the arc uses. Defaults to loadColor (high = pressure =
-  // red); pass utilColor for rented-compute utilization, where high = good.
+  // Colour for the arc. Instance cards pass their branch colour: inside a card
+  // the arc marks identity, not a verdict on the number. The loadColor default
+  // is only for a gauge that really is showing resource pressure.
   colorFn?: (v: number | null | undefined) => string;
 }
 

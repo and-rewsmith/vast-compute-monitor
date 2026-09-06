@@ -13,7 +13,6 @@ import type { BranchPoint, HistoryPoint, Instance } from "./types";
 import { ago, pct, seriesColor, usd } from "./format";
 import { TimeChart, type ChartSeries } from "./components/TimeChart";
 import { Legend } from "./components/Legend";
-import { FleetPanel } from "./components/FleetPanel";
 import { BranchRail } from "./components/BranchRail";
 import { SpendChart } from "./components/SpendChart";
 import { Ledger } from "./components/Ledger";
@@ -227,7 +226,9 @@ export default function App() {
             <div className="card">
               <div className="card-head">
                 <span className="card-title">GPU utilization - {windowLabel}</span>
-                <span className="head-right muted small">avg {pct(snapshot.fleet.avg_gpu_util)}</span>
+                <span className="head-right muted small">
+                  avg {pct(snapshot.fleet.avg_gpu_util)} across {snapshot.fleet.running} running
+                </span>
               </div>
               <Legend items={legendItems} />
               <TimeChart
@@ -243,7 +244,9 @@ export default function App() {
             <div className="card">
               <div className="card-head">
                 <span className="card-title">CPU utilization - {windowLabel}</span>
-                <span className="head-right muted small">avg {pct(snapshot.fleet.avg_cpu_util)}</span>
+                <span className="head-right muted small">
+                  avg {pct(snapshot.fleet.avg_cpu_util)} across {snapshot.fleet.running} running
+                </span>
               </div>
               <Legend items={legendItems} />
               <TimeChart
@@ -273,7 +276,6 @@ export default function App() {
             <Ledger spend={spend} snapshot={snapshot} now={now} />
           </section>
 
-          <FleetPanel fleet={snapshot.fleet} />
 
           <section className="inst-groups">
             {grouped.length === 0 ? (

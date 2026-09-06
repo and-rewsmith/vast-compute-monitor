@@ -76,6 +76,9 @@ export const WINDOWS: WindowOption[] = [
   { label: "6h", minutes: 360 },
   { label: "24h", minutes: 1440 },
   { label: "7d", minutes: 10080 },
+  // Matches the store's 30-day retention, so the selector can reach everything
+  // that is actually kept.
+  { label: "30d", minutes: 43200 },
 ];
 
 // History comes over HTTP rather than being seeded down the websocket: the

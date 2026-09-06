@@ -73,12 +73,13 @@ export function loadColor(v: number | null | undefined): string {
 }
 
 // Utilization of RENTED compute reads the opposite way round to resource
-// pressure. A GPU pinned at 99% is the outcome you are paying for; one sitting
-// at 3% is money leaving the account for nothing. So compute utilization is
-// green when high and red when low -- the inverse of loadColor, which stays
-// correct for VRAM / RAM / disk, where "full" really is the thing to worry
-// about. Getting this backwards would paint the healthiest box on the fleet in
-// alarm red, so the two scales are deliberately separate functions.
+// pressure: a GPU pinned at 99% is the outcome you are paying for, one at 3% is
+// money leaving the account for nothing.
+//
+// Used ONLY on the branch rail, where the question really is "is this branch
+// working or idle". Per-instance readings -- the cards and the table -- are
+// deliberately left uncoloured: a wall of green/amber/red cells reads as a
+// verdict on every number and drowns the one place the signal matters.
 export function utilColor(v: number | null | undefined): string {
   if (v == null) return "#3a4150";
   if (v >= 60) return "#3fb950";

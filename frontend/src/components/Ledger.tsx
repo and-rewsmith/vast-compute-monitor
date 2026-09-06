@@ -79,27 +79,27 @@ export function Ledger({
         {(spend?.periods ?? []).some((p) => !p.project) && (
           <div className="ledger-note muted small">
             {trailing && trailing.lo == null
-              ? `No remainder estimate yet — needs a few more spend samples (have ${trailing.samples}).`
-              : "No remainder shown beyond a day: a week projected from hours of history would be a guess wearing a measurement's clothes."}
+              ? `Not enough spend samples yet to estimate a remainder (have ${trailing.samples}, need 3).`
+              : "Periods longer than a day are not projected \u2014 there is not enough history yet to make the estimate meaningful."}
           </div>
         )}
       </div>
 
       <div className="ledger-foot">
         <div className="stat">
-          <div className="stat-label">Burn now</div>
+          <div className="stat-label">Listed price</div>
           <div className="stat-value">{usd(dphNow)}/hr</div>
-          <div className="muted small">sum of prices</div>
+          <div className="muted small">sum of instance prices</div>
         </div>
         <div className="stat">
-          <div className="stat-label">Realized</div>
+          <div className="stat-label">Vast is charging</div>
           <div className="stat-value">
-            {trailing?.mean != null ? `${usd(trailing.mean)}/hr` : "—"}
+            {trailing?.mean != null ? `${usd(trailing.mean)}/hr` : "\u2014"}
           </div>
           <div className="muted small">
             {trailing?.lo != null && trailing?.hi != null
-              ? `${usd(trailing.lo)}–${usd(trailing.hi)} trailing ${Math.round((trailing.window_s ?? 0) / 3600)}h`
-              : "measuring…"}
+              ? `${usd(trailing.lo)}\u2013${usd(trailing.hi)} over the last ${Math.round((trailing.window_s ?? 0) / 3600)}h`
+              : "measuring"}
           </div>
         </div>
         <div className="stat">

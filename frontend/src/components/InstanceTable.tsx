@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { Instance } from "../types";
-import { duration, pct, rate, usd, utilColor } from "../format";
+import { duration, pct, rate, usd } from "../format";
 
 type Key =
   | "label" | "id" | "status" | "gpu_name" | "gpu_util" | "cpu_util" | "ram_percent"
@@ -98,8 +98,8 @@ export function InstanceTable({
                 <td>
                   {i.num_gpus}× {i.gpu_name ?? "—"}
                 </td>
-                <td className="num" style={{ color: utilColor(i.gpu_util) }}>{pct(i.gpu_util)}</td>
-                <td className="num" style={{ color: utilColor(i.cpu_util) }}>{pct(i.cpu_util)}</td>
+                <td className="num">{pct(i.gpu_util)}</td>
+                <td className="num">{pct(i.cpu_util)}</td>
                 <td className="num">{pct(i.vram_percent)}</td>
                 <td className="num">{pct(i.ram_percent)}</td>
                 <td className="num">{pct(i.disk_percent)}</td>
@@ -120,10 +120,8 @@ export function InstanceTable({
         </table>
       </div>
       <div className="muted small table-foot">
-        GPU % and CPU % are coloured for value-for-money — green is busy, red is
-        idle spend. VRAM / RAM / Disk use the opposite scale, where full is the
-        thing to worry about. GPU % is blank where the host skipped its report;
-        disk totals include stopped instances, which still bill storage.
+        GPU % is blank where the host skipped its report. Disk totals include
+        stopped instances, which still bill storage.
       </div>
     </div>
   );

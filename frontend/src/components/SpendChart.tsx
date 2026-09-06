@@ -235,12 +235,11 @@ export function SpendChart({
       )}
 
       <div className="spend-key muted small">
-        <span className="key-swatch key-actual" /> actual, by branch
-        <span className="key-swatch key-truth" /> realized burn (Vast counter)
+        <span className="key-swatch key-actual" /> spend by branch
+        <span className="key-swatch key-truth" /> total Vast actually charged
         {trailing.hi != null && (
           <>
-            <span className="key-swatch key-proj" /> projected range · trailing{" "}
-            {Math.round(trailing.window_s / 3600)}h
+            <span className="key-swatch key-proj" /> projected range
           </>
         )}
       </div>
