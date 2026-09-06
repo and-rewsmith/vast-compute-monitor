@@ -18,7 +18,7 @@ interface Props {
 // Kept deliberately identical to the dev-server dashboard's gauge so the two
 // read as the same instrument.
 export function Gauge({ value, label, sublabel, size = 120, stale = false, colorFn = loadColor }: Props) {
-  const stroke = 10;
+  const stroke = size < 90 ? 7 : 10;
   const r = (size - stroke) / 2;
   const cx = size / 2;
   const cy = size / 2;
@@ -51,7 +51,13 @@ export function Gauge({ value, label, sublabel, size = 120, stale = false, color
           opacity={stale ? 0.4 : 1}
           style={{ transition: "stroke-dashoffset 0.4s ease, stroke 0.4s ease" }}
         />
-        <text x={cx} y={cy - 2} textAnchor="middle" className="gauge-value">
+        <text
+          x={cx}
+          y={cy + (size < 100 ? 1 : -2)}
+          textAnchor="middle"
+          className="gauge-value"
+          style={{ fontSize: size < 90 ? 14 : size < 110 ? 17 : 22 }}
+        >
           {value == null ? "—" : `${Math.round(value)}%`}
         </text>
         {sublabel && (

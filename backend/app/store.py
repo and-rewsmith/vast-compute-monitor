@@ -87,6 +87,22 @@ CREATE TABLE IF NOT EXISTS instances (
   meta        TEXT NOT NULL
 );
 
+-- Per-GPU telemetry from nvidia-smi over SSH. Separate from `samples` because
+-- it has a different grain (one row per GPU, not per instance) and a different
+-- source, so it can be missing for an instance whose API telemetry is fine.
+CREATE TABLE IF NOT EXISTS gpu_samples (
+  ts           REAL    NOT NULL,
+  instance_id  INTEGER NOT NULL,
+  gpu_index    INTEGER NOT NULL,
+  util         REAL,
+  mem_used_mb  REAL,
+  mem_total_mb REAL,
+  temp_c       REAL,
+  power_w      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_samples ON gpu_samples(instance_id, gpu_index, ts);
+CREATE INDEX IF NOT EXISTS idx_gpu_samples_ts ON gpu_samples(ts);
+
 -- Account-level ground truth, sampled on its own (slower) cadence.
 CREATE TABLE IF NOT EXISTS account (
   ts           REAL PRIMARY KEY,
@@ -167,6 +183,84 @@ class Store:
             self._db.commit()
         self._maybe_prune(ts)
 
+    def write_gpus(self, ts: float, records: list[dict]) -> None:
+        """Append one row per GPU per instance, for instances the probe reached."""
+        rows = []
+        for r in records:
+            for g in r.get("gpus") or []:
+                rows.append(
+                    (
+                        ts,
+                        r["id"],
+                        g["index"],
+                        g.get("util"),
+                        g.get("mem_used_mb"),
+                        g.get("mem_total_mb"),
+                        g.get("temp_c"),
+                        g.get("power_w"),
+                    )
+                )
+        if not rows:
+            return
+        with self._lock:
+            self._db.executemany(
+                """INSERT INTO gpu_samples
+                   (ts, instance_id, gpu_index, util, mem_used_mb, mem_total_mb, temp_c, power_w)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            self._db.commit()
+
+    def gpu_history(self, minutes: float, buckets: int) -> dict:
+        """Downsampled per-GPU series, keyed "<instance_id>:<gpu_index>"."""
+        now = time.time()
+        start = now - minutes * 60.0
+        bucket_s = max(1.0, (minutes * 60.0) / max(1, buckets))
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT instance_id, gpu_index,
+                       CAST((ts - :start) / :bucket AS INTEGER) AS b,
+                       MIN(ts) AS ts,
+                       AVG(util) AS util,
+                       AVG(mem_used_mb) AS mem_used_mb,
+                       AVG(mem_total_mb) AS mem_total_mb,
+                       AVG(temp_c) AS temp_c,
+                       AVG(power_w) AS power_w
+                  FROM gpu_samples
+                 WHERE ts >= :start
+              GROUP BY instance_id, gpu_index, b
+              ORDER BY instance_id, gpu_index, b
+                """,
+                {"start": start, "bucket": bucket_s},
+            ).fetchall()
+
+        series: dict[str, list[dict]] = {}
+        for r in rows:
+            key = f"{r['instance_id']}:{r['gpu_index']}"
+            series.setdefault(key, []).append(
+                {
+                    "ts": r["ts"],
+                    "util": r["util"],
+                    "mem_used_mb": r["mem_used_mb"],
+                    "mem_total_mb": r["mem_total_mb"],
+                    "mem_percent": (
+                        100.0 * r["mem_used_mb"] / r["mem_total_mb"]
+                        if r["mem_used_mb"] is not None and r["mem_total_mb"]
+                        else None
+                    ),
+                    "temp_c": r["temp_c"],
+                    "power_w": r["power_w"],
+                }
+            )
+        return {
+            "start": start,
+            "end": now,
+            "minutes": minutes,
+            "bucket_s": bucket_s,
+            "series": series,
+        }
+
     def write_account(self, ts: float, credit: float | None, total_spend: float | None) -> None:
         with self._lock:
             self._db.execute(
@@ -183,6 +277,7 @@ class Store:
         cutoff = now - self.retention_s
         with self._lock:
             self._db.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+            self._db.execute("DELETE FROM gpu_samples WHERE ts < ?", (cutoff,))
             self._db.execute("DELETE FROM account WHERE ts < ?", (cutoff,))
             self._db.commit()
 

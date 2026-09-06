@@ -151,7 +151,7 @@ body {
 
 /* ---- instance cards ----------------------------------------------------- */
 .inst-row {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: 14px; align-items: start;
 }
 .inst-card { display: flex; flex-direction: column; gap: 10px; }
@@ -324,3 +324,41 @@ body {
    full-width card lose their relationship to each other. */
 .branch-util { max-width: 560px; }
 .branch-unlabeled { border-left-style: dashed; }
+
+/* ============================================================================
+   Per-GPU blocks inside an instance card. Vast reports one averaged number per
+   instance no matter how many GPUs it has, so these come from nvidia-smi over
+   SSH -- and they are the reason the card layout changed: a 2x4090 box was
+   reporting 49.5% while one card sat at 99% and the other at 0%.
+
+   The grid auto-fits so a 1-GPU box gets one wide block, a 2-GPU box two, and
+   an 8-GPU box wraps into rows instead of shrinking each dial into illegibility.
+   ============================================================================ */
+.gpu-blocks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(152px, 1fr));
+  gap: 8px;
+}
+.gpu-block {
+  background: var(--panel-2); border-radius: 7px; padding: 8px 9px 9px;
+  display: flex; flex-direction: column; gap: 4px; min-width: 0;
+}
+.gpu-block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.gpu-block-idx {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  border: 1px solid; border-radius: 4px; padding: 0 5px;
+}
+.gpu-block-dials { display: flex; justify-content: space-around; gap: 2px; }
+.gpu-block-dials .gauge-label { font-size: 10px; margin-top: -4px; }
+.gpu-block-vram { text-align: center; font-variant-numeric: tabular-nums; margin-top: -2px; }
+.gpu-block-spark { border-top: 1px solid var(--border); padding-top: 5px; }
+.gpu-block-spark .stat-label { font-size: 9.5px; }
+.gpu-block-spark .spark { height: 26px; }
+
+/* Said out loud rather than silently degrading: a card showing an average
+   where the reader expects per-GPU numbers is the failure mode to avoid. */
+.probe-note { line-height: 1.45; }
+
+/* CPU is one pool shared by every GPU on the box, so its trace stays
+   instance-level and spans the full card width. */
+.inst-sparks.single { grid-template-columns: 1fr; }

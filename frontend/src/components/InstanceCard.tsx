@@ -1,4 +1,4 @@
-import type { HistoryPoint, Instance } from "../types";
+import type { GpuPoint, GpuReading, HistoryPoint, Instance } from "../types";
 import { ago, duration, gb, pct, rate, usd } from "../format";
 import { Gauge } from "./Gauge";
 import { Sparkline } from "./Sparkline";
@@ -21,27 +21,82 @@ function StatusPill({ inst }: { inst: Instance }) {
   return <span className="pill off">{s}</span>;
 }
 
+// One physical GPU: its own compute and VRAM dials, its own thermals, and its
+// own utilization trace. This is the whole point of the SSH probe -- the API
+// averages a multi-GPU instance into a single number, which reported 49.5% for
+// a box whose two cards were at 99% and 0%.
+function GpuBlock({
+  gpu,
+  color,
+  points,
+  windowLabel,
+}: {
+  gpu: GpuReading;
+  color: string;
+  points: GpuPoint[];
+  windowLabel: string;
+}) {
+  return (
+    <div className="gpu-block">
+      <div className="gpu-block-head">
+        <span className="gpu-block-idx" style={{ color, borderColor: `${color}55` }}>
+          GPU {gpu.index}
+        </span>
+        <span className="muted small">
+          {gpu.temp_c != null ? `${Math.round(gpu.temp_c)}°C` : "—"}
+          {gpu.power_w != null ? ` · ${Math.round(gpu.power_w)}W` : ""}
+        </span>
+      </div>
+      <div className="gpu-block-dials">
+        <Gauge value={gpu.util} label="compute" size={78} colorFn={() => color} />
+        <Gauge
+          value={gpu.mem_percent}
+          label="VRAM"
+          size={78}
+          colorFn={() => color}
+        />
+      </div>
+      <div className="gpu-block-vram muted small">
+        {gpu.mem_used_mb != null && gpu.mem_total_mb
+          ? `${gb(gpu.mem_used_mb / 1024)} / ${gb(gpu.mem_total_mb / 1024)}`
+          : "—"}
+      </div>
+      <div className="gpu-block-spark">
+        <div className="spark-head">
+          <span className="stat-label">util · {windowLabel}</span>
+          <span className="spark-now">{pct(gpu.util)}</span>
+        </div>
+        <Sparkline values={points.map((p) => p.util)} color={color} max={100} height={26} />
+      </div>
+    </div>
+  );
+}
+
 export function InstanceCard({
   inst,
   branch,
   color,
   points,
+  gpuSeries,
   windowLabel,
 }: {
   inst: Instance;
   branch: string;
   color: string;
   points: HistoryPoint[];
+  gpuSeries: Record<string, GpuPoint[]>;
   windowLabel: string;
 }) {
-  const gpuHist = points.map((p) => p.gpu_util);
   const cpuHist = points.map((p) => p.cpu_util);
+  const gpus = inst.gpus ?? [];
+  const probe = inst.gpu_probe;
 
-  // GPU telemetry arrives intermittently (see vast.py), so the gauge shows the
-  // most recent real reading and says how old it is rather than blinking to a
-  // dash every other poll.
+  // Fallback for an instance the probe has not reached (still booting, SSH
+  // blocked, key missing). The API's single averaged reading is shown instead,
+  // explicitly labelled as the average of N cards rather than dressed up as
+  // per-GPU detail that was never measured.
   let lastGpu: number | null = inst.gpu_util;
-  let lastGpuTs: number | null = inst.gpu_util != null ? points.length ? points[points.length - 1].ts : null : null;
+  let lastGpuTs: number | null = null;
   if (lastGpu == null) {
     for (let i = points.length - 1; i >= 0; i--) {
       if (points[i].gpu_util != null) {
@@ -52,7 +107,6 @@ export function InstanceCard({
     }
   }
   const gpuAge = lastGpuTs != null ? Date.now() / 1000 - lastGpuTs : null;
-  const gpuStale = inst.gpu_util == null;
 
   return (
     <div className={`card inst-card${inst.is_running ? "" : " inst-off"}`}>
@@ -73,42 +127,74 @@ export function InstanceCard({
         </span>
       </div>
 
-      <div className="gpu-gauges">
-        <Gauge
-          value={lastGpu}
-          label={gpuStale && gpuAge != null ? `GPU · ${ago(gpuAge)}` : "GPU compute"}
-          stale={gpuStale}
-          colorFn={() => color}
-        />
-        <Gauge
-          value={inst.vram_percent}
-          colorFn={() => color}
-          label="VRAM"
-          sublabel={`${gb(inst.vram_used_gb)} / ${gb(inst.vram_total_gb)}`}
-        />
-      </div>
+      {gpus.length > 0 ? (
+        <>
+          <div className="gpu-blocks">
+            {gpus.map((g) => (
+              <GpuBlock
+                key={g.index}
+                gpu={g}
+                color={color}
+                points={gpuSeries[`${inst.id}:${g.index}`] ?? []}
+                windowLabel={windowLabel}
+              />
+            ))}
+          </div>
+          {probe?.age_s != null && probe.age_s > 120 && (
+            <div className="muted small probe-note">
+              per-GPU reading {ago(probe.age_s)}
+              {probe.error ? ` — ${probe.error}` : ""}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="gpu-gauges">
+            <Gauge
+              value={lastGpu}
+              label={
+                inst.num_gpus > 1
+                  ? `GPU · avg of ${inst.num_gpus}`
+                  : gpuAge != null
+                    ? `GPU · ${ago(gpuAge)}`
+                    : "GPU compute"
+              }
+              stale={inst.gpu_util == null}
+              colorFn={() => color}
+            />
+            <Gauge
+              value={inst.vram_percent}
+              label="VRAM"
+              colorFn={() => color}
+              sublabel={`${gb(inst.vram_used_gb)} / ${gb(inst.vram_total_gb)}`}
+            />
+          </div>
+          <div className="muted small probe-note">
+            {/* Say why the detail is missing. Silently showing an average where
+                the reader expects per-GPU numbers is the failure mode here. */}
+            No per-GPU data
+            {probe?.error ? ` — ${probe.error}` : ""}
+            {inst.num_gpus > 1 ? ". Values above are Vast's average across all cards." : "."}
+          </div>
+        </>
+      )}
 
       <div className="gpu-stats">
-        <Stat
-          label="GPU temp"
-          value={inst.gpu_temp_c != null ? `${Math.round(inst.gpu_temp_c)}\u00b0C` : "\u2014"}
-        />
         <Stat label="CPU" value={pct(inst.cpu_util)} />
         <Stat label="RAM" value={pct(inst.ram_percent)} />
         <Stat label="Disk" value={pct(inst.disk_percent)} />
+        <Stat
+          label="GPU temp"
+          value={inst.gpu_temp_c != null ? `${Math.round(inst.gpu_temp_c)}°C` : "—"}
+        />
       </div>
 
-      <div className="inst-sparks">
+      {/* CPU stays instance-level: it is one pool shared by every GPU on the
+          box, so there is no per-GPU number to split it into. */}
+      <div className="inst-sparks single">
         <div className="spark-cell">
           <div className="spark-head">
-            <span className="stat-label">GPU util · {windowLabel}</span>
-            <span className="spark-now">{pct(lastGpu)}</span>
-          </div>
-          <Sparkline values={gpuHist} color={color} max={100} />
-        </div>
-        <div className="spark-cell">
-          <div className="spark-head">
-            <span className="stat-label">CPU util · {windowLabel}</span>
+            <span className="stat-label">CPU util · {windowLabel} · whole instance</span>
             <span className="spark-now">{pct(inst.cpu_util)}</span>
           </div>
           <Sparkline values={cpuHist} color={color} max={100} />

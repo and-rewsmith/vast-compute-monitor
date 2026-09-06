@@ -26,6 +26,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .gpu_probe import GpuProbe
 from .store import UNLABELED, Store
 from .vast import VastClient, load_api_key
 
@@ -173,6 +174,7 @@ class Hub:
 hub = Hub()
 store: Store | None = None
 client: VastClient | None = None
+probe: GpuProbe | None = None
 
 
 async def _poll_loop() -> None:
@@ -201,7 +203,14 @@ async def _poll_loop() -> None:
 
         if error is None:
             failures = 0
+            # Per-GPU telemetry is collected out-of-band over SSH; merge whatever
+            # the probe has cached, then kick off the next round. The API
+            # snapshot is never delayed by an unreachable box.
+            if probe is not None:
+                probe.merge(instances)
+                probe.probe(instances)
             await asyncio.to_thread(store.write, now, instances)
+            await asyncio.to_thread(store.write_gpus, now, instances)
             payload = {
                 "type": "snapshot",
                 "ts": now,
@@ -240,17 +249,19 @@ async def _poll_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global store, client
+    global store, client, probe
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     store = Store(DB_PATH, retention_days=RETENTION_DAYS, interval=POLL_INTERVAL)
     # Constructed here rather than lazily so a missing/invalid API key fails the
     # service at startup, loudly, instead of showing an empty dashboard forever.
     client = VastClient()
+    probe = GpuProbe()
     task = asyncio.create_task(_poll_loop())
     try:
         yield
     finally:
         task.cancel()
+        probe.close()
         client.close()
         store.close()
 
@@ -272,6 +283,10 @@ async def info() -> JSONResponse:
             # Fingerprint only. The key itself never leaves the backend.
             "api_key_tail": key[-6:],
             "store": store.stats() if store else None,
+            "gpu_probe": {
+                "available": probe.available if probe else False,
+                "reason": probe.unavailable_reason() if probe else "not started",
+            },
         }
     )
 
@@ -355,6 +370,16 @@ async def spend(minutes: float = Query(1440.0, gt=0, le=60 * 24 * 90)) -> JSONRe
         }
 
     return JSONResponse(await asyncio.to_thread(_run))
+
+
+@app.get("/api/gpu-history")
+async def gpu_history(
+    minutes: float = Query(60.0, gt=0, le=60 * 24 * 90),
+    buckets: int = Query(240, ge=10, le=2000),
+) -> JSONResponse:
+    """Per-GPU series, keyed "<instance_id>:<gpu_index>"."""
+    assert store is not None
+    return JSONResponse(await asyncio.to_thread(store.gpu_history, minutes, buckets))
 
 
 @app.get("/api/branches")

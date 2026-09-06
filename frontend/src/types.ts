@@ -2,6 +2,27 @@
 // there and documented here so no component has to guess:
 //   *_util / *_percent  percent 0-100      *_gb   gigabytes
 //   *_bps               bytes/sec          dph_*  US dollars per hour
+// One physical GPU, from nvidia-smi on the instance. Vast's API cannot supply
+// this -- it reports a single averaged number per instance regardless of GPU
+// count -- so these come from the SSH probe and may be absent.
+export interface GpuReading {
+  index: number;
+  name: string;
+  util: number | null;
+  mem_used_mb: number | null;
+  mem_total_mb: number | null;
+  mem_percent: number | null;
+  temp_c: number | null;
+  power_w: number | null;
+  sm_clock_mhz: number | null;
+}
+
+export interface GpuProbeStatus {
+  ok: boolean;
+  error: string | null;
+  age_s: number | null;
+}
+
 export interface Instance {
   id: number;
   label: string | null;
@@ -18,6 +39,9 @@ export interface Instance {
   gpu_util: number | null;
   gpu_temp_c: number | null;
   gpu_reporting: boolean;
+  // Per-GPU breakdown; empty when the probe could not reach the instance.
+  gpus: GpuReading[];
+  gpu_probe: GpuProbeStatus | null;
   vram_used_gb: number | null;
   vram_total_gb: number | null;
   vram_percent: number | null;
@@ -196,6 +220,25 @@ export interface History {
   minutes: number;
   bucket_s: number;
   series: Record<string, HistoryPoint[]>;
+}
+
+export interface GpuPoint {
+  ts: number;
+  util: number | null;
+  mem_used_mb: number | null;
+  mem_total_mb: number | null;
+  mem_percent: number | null;
+  temp_c: number | null;
+  power_w: number | null;
+}
+
+export interface GpuHistory {
+  start: number;
+  end: number;
+  minutes: number;
+  bucket_s: number;
+  // Keyed "<instance_id>:<gpu_index>".
+  series: Record<string, GpuPoint[]>;
 }
 
 export interface Info {

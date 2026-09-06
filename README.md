@@ -41,13 +41,53 @@ branch is the unit of display and of cost attribution throughout.
   left, hatched projection wedge to the right. See "Actual versus projected".
 - **Cumulative spend** — dollars so far across the window, stacked by branch,
   with what Vast actually charged drawn over it.
-- **Per-instance cards**, grouped under their branch — GPU and VRAM dials,
-  temperature, CPU, RAM, disk, sparklines, cost, uptime, location, SSH, image.
+- **Per-instance cards**, grouped under their branch, with **one block per
+  physical GPU** — its own compute and VRAM dials, its own temperature, power
+  and utilization trace. CPU stays instance-level, since it is one pool shared
+  by every GPU on the box. Plus cost, uptime, location, SSH and image.
 - **A sortable table** of every rented instance, Branch first, which doubles as
   the no-hover/accessible view of everything the charts plot.
 
 Every chart and sparkline follows the window selector, up to **30d** — the same
 as the store's retention, so the selector reaches everything that is kept.
+
+## Per-GPU telemetry, and why it needs SSH
+
+Vast's API reports **one** number per instance for GPU utilization, temperature
+and VRAM, however many GPUs the instance has. It is an average, and the average
+hides the thing worth seeing. Measured on a live 2×4090 box:
+
+```
+API:     gpu_util = 49.5
+Reality: GPU 0  util 99%  2158/24564 MB  44°C  220.7 W
+         GPU 1  util  0%      4/24564 MB  22°C   21.8 W
+```
+
+One card pinned, one card idle, on a machine billed for both. No endpoint
+exposes the split — `/instances/{id}/` returns the same scalars and
+`/instances/{id}/gpus` is a 404 — so the only honest source is the box itself.
+The backend therefore runs `nvidia-smi` on each running instance over SSH.
+
+- **Connections are multiplexed** (`ControlMaster` / `ControlPersist`). The
+  first probe pays the handshake; later ones reuse the socket, which is what
+  makes a 30s cadence across a fleet affordable.
+- **Probing is out-of-band**, in its own thread pool, and the poll loop reads a
+  cache. A box that has gone unreachable slows nothing but itself.
+- **Failures back off per instance** and keep the last good reading, labelled
+  with its age. An instance that is still booting refuses SSH for a minute or
+  two; that is normal, not an error to retry forever.
+- **When the probe cannot reach an instance**, the card falls back to Vast's
+  averaged number and *says so* — labelled "avg of N" rather than dressed up as
+  per-GPU detail that was never measured.
+
+Config: `VASTMON_SSH_PROBE=0` disables it entirely; `VASTMON_SSH_KEY`
+(default `~/.ssh/id_ed25519`), `VASTMON_SSH_USER` (default `root`),
+`VASTMON_PROBE_TIMEOUT`, `VASTMON_PROBE_WORKERS`, `VASTMON_PROBE_PERSIST`.
+`/api/info` reports whether the probe is available and why not.
+
+The top-of-page utilization charts and the branch rail still use Vast's
+per-instance numbers, so a fleet-level average there can differ from the
+per-GPU detail on the cards below.
 
 ## Actual versus projected
 

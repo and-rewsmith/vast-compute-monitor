@@ -6,6 +6,8 @@ import type {
   History,
   HistoryPoint,
   Info,
+  GpuHistory,
+  GpuPoint,
   Snapshot,
   Spend,
 } from "../types";
@@ -305,6 +307,61 @@ export function useBranchCosts(days: number, snapshot: Snapshot | null) {
     refetch();
   }, [n]);
   return branches;
+}
+
+// Per-GPU history, keyed "<instance_id>:<gpu_index>". Same append-live pattern
+// as the others so each GPU's sparkline keeps moving between refetches.
+export function useGpuHistory(minutes: number, snapshot: Snapshot | null) {
+  const [history, setHistory] = useState<GpuHistory | null>(null);
+  const lastAppended = useRef<number>(0);
+
+  const refetch = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/gpu-history?minutes=${minutes}&buckets=240`);
+      const data: GpuHistory = await r.json();
+      setHistory(data);
+      lastAppended.current = data.end;
+    } catch {
+      // Keep the previous render; the next periodic refetch retries.
+    }
+  }, [minutes]);
+
+  useEffect(() => {
+    refetch();
+  }, [refetch]);
+
+  useEffect(() => {
+    const period = Math.max(30_000, ((minutes * 60) / 240) * 1000);
+    const id = window.setInterval(refetch, period);
+    return () => window.clearInterval(id);
+  }, [refetch, minutes]);
+
+  useEffect(() => {
+    if (!snapshot || snapshot.error || !history) return;
+    if (snapshot.ts <= lastAppended.current) return;
+    lastAppended.current = snapshot.ts;
+    setHistory((prev) => {
+      if (!prev) return prev;
+      const series: Record<string, GpuPoint[]> = { ...prev.series };
+      for (const inst of snapshot.instances) {
+        for (const g of inst.gpus ?? []) {
+          const key = `${inst.id}:${g.index}`;
+          series[key] = (series[key] ?? []).concat({
+            ts: snapshot.ts,
+            util: g.util,
+            mem_used_mb: g.mem_used_mb,
+            mem_total_mb: g.mem_total_mb,
+            mem_percent: g.mem_percent,
+            temp_c: g.temp_c,
+            power_w: g.power_w,
+          });
+        }
+      }
+      return { ...prev, series, end: snapshot.ts };
+    });
+  }, [snapshot?.ts, history !== null]);
+
+  return history;
 }
 
 export function useInfo() {

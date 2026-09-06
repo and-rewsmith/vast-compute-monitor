@@ -3,6 +3,7 @@ import {
   WINDOWS,
   useBranchCosts,
   useBranchHistory,
+  useGpuHistory,
   useHistory,
   useInfo,
   useSnapshot,
@@ -55,6 +56,7 @@ export default function App() {
   const branchHistory = useBranchHistory(minutes, snapshot, group === "branch");
   const { spend } = useSpend(minutes, snapshot);
   const branchCosts = useBranchCosts(7, snapshot);
+  const gpuHistory = useGpuHistory(minutes, snapshot);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now() / 1000), 1000);
@@ -345,6 +347,7 @@ export default function App() {
                         branch={branch}
                         color={colorForBranch(branch)}
                         points={instHistory.history?.series[String(i.id)] ?? []}
+                        gpuSeries={gpuHistory?.series ?? {}}
                         windowLabel={windowLabel}
                       />
                     ))}
