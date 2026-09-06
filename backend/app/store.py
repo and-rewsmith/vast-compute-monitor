@@ -1,16 +1,23 @@
-"""SQLite time-series store for Vast instance telemetry.
+"""SQLite time-series store for Vast instance telemetry and account spend.
 
-Why a database instead of the in-RAM ring buffer the Allen dashboard uses: Vast
-instances are rented for days or weeks, and the question you actually want
-answered is "was this box busy last night?", not "what did it do in the last
-five minutes". A restart of this service -- or of the laptop -- must not erase
-that. SQLite is the right size of tool here: one file, no daemon, no dependency,
-and it handles the one query that matters (bucketed downsample over a window)
-in the engine rather than in Python.
+Why a database instead of an in-RAM ring buffer: Vast instances are rented for
+days, and the questions worth answering are "was this branch busy overnight?"
+and "what did that experiment cost?" -- neither survives a restart in RAM.
+SQLite is the right size of tool: one file, no daemon, and it does the two
+queries that matter (bucketed downsample, and cost integration via a window
+function) in the engine rather than in Python.
 
-Concurrency: one connection shared under a lock. Writes come from the poller
-thread, reads from FastAPI request handlers. WAL mode keeps readers from
-blocking the writer.
+Two independent spend signals are kept, and they are never mixed:
+
+  * `samples.dph_total`  -- the per-instance price, integrated over time. This
+    is an ESTIMATE, but it is attributable: it decomposes by branch and by
+    instance, which the account counter cannot.
+  * `account.total_spend` -- Vast's cumulative lifetime spend counter. This is
+    GROUND TRUTH, immune to autobill top-ups (which move `credit` only), but it
+    is account-wide and cannot be attributed to a branch.
+
+Concurrency: one connection under a lock. Writes come from the poller thread,
+reads from FastAPI request handlers. WAL keeps readers off the writer's back.
 """
 
 from __future__ import annotations
@@ -21,9 +28,9 @@ import threading
 import time
 from pathlib import Path
 
-# Columns sampled every poll. Kept deliberately narrow -- these are the series
-# worth charting; the wide descriptive fields (image, ssh host, cpu model) go in
-# the `instances` metadata table where they are written once, not per tick.
+# Per-tick numeric series. Deliberately narrow -- these are what gets charted.
+# Wide descriptive fields live in `instances.meta`, written once per poll rather
+# than duplicated into every row.
 SERIES_COLUMNS = (
     "gpu_util",
     "cpu_util",
@@ -38,6 +45,30 @@ SERIES_COLUMNS = (
     "net_sent_bps",
     "dph_total",
 )
+
+# Columns that are not part of the charted series but must be per-sample:
+#   label     -- the branch. First-class (not buried in the meta JSON) because
+#                everything groups by it, and because it has to stay queryable
+#                after the instance is destroyed and its meta row goes stale.
+#   num_gpus  -- the weight for averaging utilization across a branch. A 2-GPU
+#                worker at 90% and a 1-GPU worker at 30% is not a 60% branch.
+EXTRA_COLUMNS = (("label", "TEXT"), ("num_gpus", "REAL"))
+
+# A gap longer than this many poll intervals is not charged when integrating
+# cost. The poller being down is not evidence the instance was up, and silently
+# billing the outage would inflate exactly the number people trust most.
+MAX_CHARGE_GAP_INTERVALS = 3.0
+
+UNLABELED = "(unlabeled)"
+
+# Minimum baseline for a realized-burn reading. Vast advances `total_spend` on
+# its own schedule, so differencing two adjacent polls aliases badly against it:
+# consecutive readings measured $1.30/hr then $2.90/hr while the true rate was a
+# steady $2.26/hr. Neither number was wrong, they just straddled the upstream
+# update. Rates are therefore measured across at least this much elapsed time,
+# which keeps the reading ground truth while making the spread it advertises
+# reflect the fleet changing rather than the sampler beating against the API.
+MIN_BURN_DT = 300.0
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS samples (
@@ -55,25 +86,48 @@ CREATE TABLE IF NOT EXISTS instances (
   last_seen   REAL NOT NULL,
   meta        TEXT NOT NULL
 );
+
+-- Account-level ground truth, sampled on its own (slower) cadence.
+CREATE TABLE IF NOT EXISTS account (
+  ts           REAL PRIMARY KEY,
+  credit       REAL,
+  total_spend  REAL
+);
 """
 
 
 class Store:
-    def __init__(self, path: Path, retention_days: float = 30.0) -> None:
+    def __init__(self, path: Path, retention_days: float = 30.0, interval: float = 30.0) -> None:
         self.path = path
         self.retention_s = retention_days * 86400.0
+        self.interval = interval
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         # NORMAL is the right durability point for telemetry: it survives a
-        # process crash, and the worst case for an OS-level crash is losing the
-        # last poll or two of a metric we resample continuously anyway.
+        # process crash, and an OS-level crash costs at most the last poll of a
+        # signal we resample continuously anyway.
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
+        self._migrate()
         self._db.commit()
         self._last_prune = 0.0
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created.
+
+        Done with ALTER TABLE rather than a version stamp because every change
+        so far is additive; existing rows keep NULL for the new column, which is
+        the honest value -- we genuinely did not record a branch for samples
+        taken before branches were tracked.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(samples)")}
+        for name, decl in EXTRA_COLUMNS:
+            if name not in have:
+                self._db.execute(f"ALTER TABLE samples ADD COLUMN {name} {decl}")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_samples_label_ts ON samples(label, ts)")
 
     def close(self) -> None:
         with self._lock:
@@ -83,10 +137,17 @@ class Store:
 
     def write(self, ts: float, records: list[dict]) -> None:
         """Append one sample row per instance, and upsert its metadata."""
-        cols = ("ts", "instance_id", "is_running", *SERIES_COLUMNS)
+        cols = ("ts", "instance_id", "is_running", *SERIES_COLUMNS, "label", "num_gpus")
         placeholders = ", ".join("?" for _ in cols)
         rows = [
-            (ts, r["id"], 1 if r["is_running"] else 0, *(r.get(c) for c in SERIES_COLUMNS))
+            (
+                ts,
+                r["id"],
+                1 if r["is_running"] else 0,
+                *(r.get(c) for c in SERIES_COLUMNS),
+                r.get("label"),
+                r.get("num_gpus"),
+            )
             for r in records
         ]
         with self._lock:
@@ -106,6 +167,14 @@ class Store:
             self._db.commit()
         self._maybe_prune(ts)
 
+    def write_account(self, ts: float, credit: float | None, total_spend: float | None) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO account (ts, credit, total_spend) VALUES (?, ?, ?)",
+                (ts, credit, total_spend),
+            )
+            self._db.commit()
+
     def _maybe_prune(self, now: float) -> None:
         """Drop samples past the retention window, at most once an hour."""
         if now - self._last_prune < 3600.0:
@@ -114,18 +183,18 @@ class Store:
         cutoff = now - self.retention_s
         with self._lock:
             self._db.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+            self._db.execute("DELETE FROM account WHERE ts < ?", (cutoff,))
             self._db.commit()
 
-    # ----------------------------------------------------------------- reads
+    # ----------------------------------------------------------- util history
 
     def history(self, minutes: float, buckets: int) -> dict:
-        """Downsampled per-instance series over the last `minutes`.
+        """Downsampled per-INSTANCE series over the last `minutes`.
 
-        Averaging inside fixed-width time buckets is done by SQLite so a 7-day
-        window costs the same to render as a 15-minute one. Buckets with no
-        sample simply do not appear -- the client draws gaps rather than
-        inventing a value across a period when the poller was down, which is
-        exactly the distinction you want when reading a utilization chart.
+        Bucket averaging happens in SQLite, so a 7-day window costs the same to
+        render as a 15-minute one. Buckets with no sample are simply absent --
+        the client draws a gap rather than interpolating across a period the
+        poller never observed.
         """
         now = time.time()
         start = now - minutes * 60.0
@@ -163,11 +232,199 @@ class Store:
             "series": series,
         }
 
-    def known_instances(self, since: float | None = None) -> list[dict]:
-        """Last-known metadata for every instance ever seen (optionally recent).
+    def branch_history(self, minutes: float, buckets: int) -> dict:
+        """Downsampled per-BRANCH series: utilization weighted by GPU count.
 
-        Used to keep an instance you destroyed this morning visible in the
-        history charts instead of having its line vanish with no explanation.
+        A branch is a set of workers, so its utilization is the GPU-weighted
+        mean of theirs -- a 2-GPU worker at 90% next to a 1-GPU worker at 30% is
+        a 70% branch, not a 60% one. The weighted mean is built in two stages so
+        that an instance sampled twice inside one bucket does not count twice:
+        average per instance first, then combine across the branch.
+        """
+        now = time.time()
+        start = now - minutes * 60.0
+        bucket_s = max(1.0, (minutes * 60.0) / max(1, buckets))
+
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT label,
+                       b,
+                       MIN(ts) AS ts,
+                       COUNT(*) AS instances,
+                       SUM(w) AS gpus,
+                       SUM(CASE WHEN gpu_util IS NOT NULL THEN gpu_util * w END)
+                         / NULLIF(SUM(CASE WHEN gpu_util IS NOT NULL THEN w END), 0) AS gpu_util,
+                       SUM(CASE WHEN cpu_util IS NOT NULL THEN cpu_util * w END)
+                         / NULLIF(SUM(CASE WHEN cpu_util IS NOT NULL THEN w END), 0) AS cpu_util,
+                       SUM(dph) AS dph_total
+                  FROM (
+                        SELECT COALESCE(label, :unlabeled) AS label,
+                               instance_id,
+                               CAST((ts - :start) / :bucket AS INTEGER) AS b,
+                               MIN(ts) AS ts,
+                               AVG(gpu_util) AS gpu_util,
+                               AVG(cpu_util) AS cpu_util,
+                               AVG(dph_total) AS dph,
+                               COALESCE(MAX(num_gpus), 1) AS w
+                          FROM samples
+                         WHERE ts >= :start
+                      GROUP BY instance_id, b
+                       )
+              GROUP BY label, b
+              ORDER BY label, b
+                """,
+                {"start": start, "bucket": bucket_s, "unlabeled": UNLABELED},
+            ).fetchall()
+
+        series: dict[str, list[dict]] = {}
+        for row in rows:
+            series.setdefault(row["label"], []).append(
+                {
+                    "ts": row["ts"],
+                    "instances": row["instances"],
+                    "gpus": row["gpus"],
+                    "gpu_util": row["gpu_util"],
+                    "cpu_util": row["cpu_util"],
+                    "dph_total": row["dph_total"],
+                }
+            )
+
+        return {
+            "start": start,
+            "end": now,
+            "minutes": minutes,
+            "bucket_s": bucket_s,
+            "series": series,
+        }
+
+    # ------------------------------------------------------------ attribution
+
+    def branch_costs(self, since: float | None = None) -> list[dict]:
+        """Per-branch integrated cost, plus lifecycle timestamps.
+
+        Cost is a Riemann sum over each instance's own samples: price at a
+        sample multiplied by the interval to the NEXT sample. The interval is
+        capped, so a stretch where the poller was down contributes nothing
+        rather than billing hours nobody observed -- undercounting a gap is
+        honest, inventing spend through it is not.
+        """
+        cap = self.interval * MAX_CHARGE_GAP_INTERVALS
+        params: dict = {"cap": cap, "unlabeled": UNLABELED, "since": since if since is not None else 0.0}
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT label,
+                       MIN(ts)  AS first_seen,
+                       MAX(ts)  AS last_seen,
+                       COUNT(DISTINCT instance_id) AS instances,
+                       SUM(COALESCE(dph_total, 0) * MIN(COALESCE(dt, 0), :cap)) / 3600.0 AS cost,
+                       SUM(CASE WHEN gpu_util IS NOT NULL THEN gpu_util * w END)
+                         / NULLIF(SUM(CASE WHEN gpu_util IS NOT NULL THEN w END), 0) AS avg_gpu_util
+                  FROM (
+                        SELECT COALESCE(label, :unlabeled) AS label,
+                               instance_id, ts, dph_total, gpu_util,
+                               COALESCE(num_gpus, 1) AS w,
+                               LEAD(ts) OVER (PARTITION BY instance_id ORDER BY ts) - ts AS dt
+                          FROM samples
+                         WHERE ts >= :since
+                       )
+              GROUP BY label
+              ORDER BY last_seen DESC
+                """,
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------ spend
+
+    def account_spend(self, start: float, end: float | None = None) -> dict:
+        """Realized spend between two timestamps, from Vast's own counter.
+
+        Differencing `total_spend` gives ground truth. Autobill top-ups do not
+        appear here at all (they move `credit`, not this counter), but the guard
+        against positive deltas stays: a refund or an upstream correction would
+        otherwise be charged as spend.
+
+        `coverage` reports how much of the requested period we actually have
+        samples for. A "this week" figure built from four hours of data is a
+        fabrication, and the UI needs to be able to say so rather than print a
+        confident under-count.
+        """
+        end = end if end is not None else time.time()
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT ts, total_spend,
+                       total_spend - LAG(total_spend) OVER (ORDER BY ts) AS d,
+                       ts - LAG(ts) OVER (ORDER BY ts) AS dt
+                  FROM account
+                 WHERE ts >= :start AND ts <= :end AND total_spend IS NOT NULL
+              ORDER BY ts
+                """,
+                {"start": start, "end": end},
+            ).fetchall()
+
+        # Total spent uses every delta (exact); the burn SERIES is resampled onto
+        # a coarser baseline (accurate, un-aliased). Two different jobs, so two
+        # different accumulations over the same rows.
+        spent = 0.0
+        burn: list[dict] = []
+        acc_spend = 0.0
+        acc_dt = 0.0
+        for r in rows:
+            if r["d"] is None or r["dt"] is None or r["dt"] <= 0:
+                continue
+            # total_spend decreases as money is spent, so a NEGATIVE delta is
+            # the spend. A positive delta is a correction, not income.
+            if r["d"] > 0:
+                # JUSTIFICATION FOR NO FAIL-FAST:
+                # A refund or upstream correction is a legitimate account event
+                # we cannot attribute to a time window. Skipping the interval
+                # keeps the spend total from going backwards; failing here would
+                # take the dashboard down over a bookkeeping adjustment.
+                continue
+            spent += -r["d"]
+            acc_spend += -r["d"]
+            acc_dt += r["dt"]
+            if acc_dt >= MIN_BURN_DT:
+                burn.append({"ts": r["ts"], "burn_hr": (acc_spend / acc_dt) * 3600.0})
+                acc_spend = 0.0
+                acc_dt = 0.0
+
+        covered = 0.0
+        if rows:
+            covered = min(end, rows[-1]["ts"]) - max(start, rows[0]["ts"])
+        period = max(1e-9, end - start)
+        return {
+            "start": start,
+            "end": end,
+            "spent": spent,
+            "burn": burn,
+            "coverage": max(0.0, min(1.0, covered / period)),
+            "samples": len(rows),
+        }
+
+    def account_extent(self) -> float | None:
+        """Timestamp of the oldest account sample -- when spend tracking began."""
+        with self._lock:
+            row = self._db.execute("SELECT MIN(ts) AS t FROM account").fetchone()
+        return row["t"] if row and row["t"] is not None else None
+
+    def latest_account(self) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT ts, credit, total_spend FROM account ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------ misc
+
+    def known_instances(self, since: float | None = None) -> list[dict]:
+        """Last-known metadata for every instance seen (optionally recent).
+
+        Keeps an instance destroyed this morning present in the history charts
+        instead of having its line vanish with no explanation.
         """
         sql = "SELECT id, first_seen, last_seen, meta FROM instances"
         params: tuple = ()
@@ -182,11 +439,10 @@ class Store:
                 meta = json.loads(row["meta"])
             except ValueError:
                 # JUSTIFICATION FOR NO FAIL-FAST:
-                # A metadata blob that fails to parse (only reachable if the DB
-                # file was hand-edited or truncated mid-write) costs the labels
-                # for one instance. Its numeric history is in a different table
-                # and stays chartable, so degrading this row to an empty label
-                # set beats refusing to serve any history at all.
+                # A metadata blob that fails to parse costs the labels for one
+                # instance. Its numeric history lives in a different table and
+                # stays chartable, so degrading this row beats refusing to serve
+                # any history at all.
                 meta = {}
             out.append(
                 {

@@ -16,6 +16,7 @@ the data source:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import time
@@ -26,7 +27,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .store import Store
+from .store import UNLABELED, Store
 from .vast import VastClient, load_api_key
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +46,17 @@ STATIC_DIR = Path(os.environ.get("VASTMON_STATIC", REPO_ROOT / "frontend/dist"))
 # Backoff applied on consecutive upstream failures, capped so a long outage
 # still retries a couple of times a minute once Vast comes back.
 MAX_BACKOFF = 120.0
+
+# The account endpoint is polled on every Nth instance poll. Spend moves slowly
+# and predictably compared to utilization, so there is no reason to double our
+# request rate against a rate-limited API to watch it.
+ACCOUNT_EVERY = int(os.environ.get("VASTMON_ACCOUNT_EVERY", "2"))
+
+# Trailing window used to characterise realized burn. Projections are built from
+# this, never from the instantaneous sum of dph: that sum is a step function
+# which jumps the moment an instance is created or destroyed, and extrapolating
+# a week from a value thirty seconds old is extrapolating from noise.
+TRAILING_BURN_S = float(os.environ.get("VASTMON_TRAILING_BURN_S", str(3 * 3600)))
 
 
 def fleet_summary(instances: list[dict]) -> dict:
@@ -85,7 +97,45 @@ def fleet_summary(instances: list[dict]) -> dict:
             for i in running
             if (i.get("gpu_util") is not None and i["gpu_util"] < 5.0)
         ),
+        "branches": len({branch_of(i) for i in instances}),
     }
+
+
+def branch_of(inst: dict) -> str:
+    """Branch key for an instance. Labels are branch names and are NOT unique --
+    several workers routinely share one -- so this is a grouping key, and the
+    branch, not the instance, is the unit of display and cost attribution."""
+    label = (inst.get("label") or "").strip()
+    return label or UNLABELED
+
+
+def live_branches(instances: list[dict]) -> list[dict]:
+    """Roll the current instance list up by branch, for the branch rail."""
+    groups: dict[str, list[dict]] = {}
+    for i in instances:
+        groups.setdefault(branch_of(i), []).append(i)
+
+    out = []
+    for name, members in groups.items():
+        running = [m for m in members if m["is_running"]]
+        # GPU-weighted mean: a 2-GPU worker at 90% beside a 1-GPU worker at 30%
+        # is a 70% branch, not a 60% one.
+        num = sum((m["gpu_util"] or 0.0) * m["num_gpus"] for m in running if m["gpu_util"] is not None)
+        den = sum(m["num_gpus"] for m in running if m["gpu_util"] is not None)
+        out.append(
+            {
+                "branch": name,
+                "instances": len(members),
+                "running": len(running),
+                "gpus": sum(m["num_gpus"] for m in running),
+                "dph_total": sum(m["dph_total"] or 0.0 for m in members),
+                "gpu_util": (num / den) if den else None,
+                "ids": sorted(m["id"] for m in members),
+                "started": min((m["start_date"] or 0.0) for m in members) or None,
+            }
+        )
+    out.sort(key=lambda b: (-b["dph_total"], b["branch"]))
+    return out
 
 
 class Hub:
@@ -94,6 +144,7 @@ class Hub:
     def __init__(self) -> None:
         self.clients: set[WebSocket] = set()
         self.latest: dict | None = None
+        self.account: dict | None = None
         self._lock = asyncio.Lock()
 
     async def add(self, ws: WebSocket) -> None:
@@ -128,9 +179,26 @@ client: VastClient | None = None
 async def _poll_loop() -> None:
     assert store is not None and client is not None
     failures = 0
+    tick = 0
     while True:
         instances, error = await asyncio.to_thread(client.fetch)
         now = time.time()
+
+        # Account/spend counter on a slower cadence than utilization.
+        if tick % ACCOUNT_EVERY == 0:
+            account, acct_err = await asyncio.to_thread(client.fetch_account)
+            if account is not None and account.get("total_spend") is not None:
+                await asyncio.to_thread(
+                    store.write_account, now, account.get("credit"), account.get("total_spend")
+                )
+                hub.account = account
+            elif acct_err:
+                # JUSTIFICATION FOR NO FAIL-FAST:
+                # Spend is a secondary signal. If the account endpoint is having
+                # a bad minute, utilization must keep flowing; the ledger simply
+                # reports the coverage it has and the next tick retries.
+                pass
+        tick += 1
 
         if error is None:
             failures = 0
@@ -140,6 +208,8 @@ async def _poll_loop() -> None:
                 "ts": now,
                 "instances": instances,
                 "fleet": fleet_summary(instances),
+                "branches": live_branches(instances),
+                "account": hub.account,
                 "error": None,
                 "interval": POLL_INTERVAL,
             }
@@ -154,6 +224,8 @@ async def _poll_loop() -> None:
                 "ts": now,
                 "instances": prev.get("instances", []),
                 "fleet": prev.get("fleet", fleet_summary([])),
+                "branches": prev.get("branches", []),
+                "account": hub.account,
                 "error": error,
                 "stale_since": prev.get("stale_since") or prev.get("ts") or now,
                 "interval": POLL_INTERVAL,
@@ -171,7 +243,7 @@ async def _poll_loop() -> None:
 async def lifespan(app: FastAPI):
     global store, client
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    store = Store(DB_PATH, retention_days=RETENTION_DAYS)
+    store = Store(DB_PATH, retention_days=RETENTION_DAYS, interval=POLL_INTERVAL)
     # Constructed here rather than lazily so a missing/invalid API key fails the
     # service at startup, loudly, instead of showing an empty dashboard forever.
     client = VastClient()
@@ -219,6 +291,142 @@ async def history(
     assert store is not None
     data = await asyncio.to_thread(store.history, minutes, buckets)
     return JSONResponse(data)
+
+
+def _period_bounds(now: float) -> dict[str, tuple[float, float]]:
+    """Local-clock boundaries for the ledger's periods.
+
+    Local, not UTC: "today" has to mean the day the reader is having, or the
+    number is quietly answering a different question than the one being asked.
+    """
+    local = datetime.datetime.fromtimestamp(now).astimezone()
+    hour = local.replace(minute=0, second=0, microsecond=0)
+    day = hour.replace(hour=0)
+    week = day - datetime.timedelta(days=day.weekday())  # Monday
+    return {
+        "hour": (hour.timestamp(), (hour + datetime.timedelta(hours=1)).timestamp()),
+        "day": (day.timestamp(), (day + datetime.timedelta(days=1)).timestamp()),
+        "week": (week.timestamp(), (week + datetime.timedelta(days=7)).timestamp()),
+    }
+
+
+def _trailing_burn(now: float) -> dict:
+    """Realized dollars/hour over the trailing window: min, max and mean.
+
+    This is what the remainder of a period is estimated from -- deliberately a
+    RANGE rather than a point. The spread is the honest content of the estimate:
+    it says "depends whether these boxes stay up", which is the actual
+    uncertainty, instead of asserting a single confident number.
+    """
+    assert store is not None
+    window = store.account_spend(now - TRAILING_BURN_S, now)
+    rates = [b["burn_hr"] for b in window["burn"]]
+    if len(rates) < 3:
+        # JUSTIFICATION FOR NO FAIL-FAST:
+        # Too few samples is the normal state for the first minutes after a
+        # fresh install, not an error. Returning "no estimate" makes the UI omit
+        # the projection entirely, which is the correct rendering of not knowing.
+        return {"window_s": TRAILING_BURN_S, "samples": len(rates), "lo": None, "hi": None, "mean": None}
+    rates.sort()
+    # Trim the extremes: a single poll spanning a restart shows up as one wild
+    # rate and would otherwise set the whole advertised range.
+    trim = len(rates) // 10
+    core = rates[trim: len(rates) - trim] or rates
+    return {
+        "window_s": TRAILING_BURN_S,
+        "samples": len(rates),
+        "lo": core[0],
+        "hi": core[-1],
+        "mean": sum(core) / len(core),
+    }
+
+
+@app.get("/api/spend")
+async def spend(minutes: float = Query(1440.0, gt=0, le=60 * 24 * 90)) -> JSONResponse:
+    """The ledger: realized spend per period, plus what can honestly be said
+    about the rest of each period.
+
+    Every period is split into ACTUAL and REMAINDER and never blended into one
+    number. `coverage` says how much of the period we actually observed, so a
+    "this week" figure assembled from four hours of data can be shown as the
+    fragment it is instead of a confident under-count.
+    """
+    assert store is not None
+    now = time.time()
+
+    def _run() -> dict:
+        bounds = _period_bounds(now)
+        trailing = _trailing_burn(now)
+        extent = store.account_extent()
+
+        periods = []
+        for key, (start, end) in bounds.items():
+            window = store.account_spend(start, now)
+            period_s = end - start
+            remaining_s = max(0.0, end - now)
+            # Forecasting is offered only for the current hour and day. A week
+            # projected from a few hours of history is a fabrication, and putting
+            # it in the same table as a measured number lends it that number's
+            # credibility -- so it is simply not produced.
+            project = period_s <= 86400.0 and trailing["lo"] is not None
+            periods.append(
+                {
+                    "key": key,
+                    "start": start,
+                    "end": end,
+                    "elapsed_s": now - start,
+                    "remaining_s": remaining_s,
+                    "period_s": period_s,
+                    "actual": window["spent"],
+                    "coverage": window["coverage"],
+                    "samples": window["samples"],
+                    "project": project,
+                    "remainder_lo": (trailing["lo"] * remaining_s / 3600.0) if project else None,
+                    "remainder_hi": (trailing["hi"] * remaining_s / 3600.0) if project else None,
+                }
+            )
+
+        series = store.branch_history(minutes, 240)
+        history = store.account_spend(now - minutes * 60.0, now)
+        return {
+            "now": now,
+            "tracking_since": extent,
+            "trailing_burn": trailing,
+            "periods": periods,
+            # Per-branch $/hr over the window -- the attributable estimate,
+            # stacked in the chart.
+            "branch_series": series["series"],
+            "start": series["start"],
+            "end": series["end"],
+            "bucket_s": series["bucket_s"],
+            # Account-wide realized burn -- ground truth, drawn as one line over
+            # the stack. Divergence between the two is itself informative.
+            "account_burn": history["burn"],
+        }
+
+    return JSONResponse(await asyncio.to_thread(_run))
+
+
+@app.get("/api/branches")
+async def branches(days: float = Query(7.0, gt=0)) -> JSONResponse:
+    """Branch lifecycle and integrated cost, including finished branches.
+
+    A branch that ended this morning keeps its row -- with what it cost -- which
+    is the whole reason the history is persisted.
+    """
+    assert store is not None
+    since = time.time() - days * 86400.0
+    rows = await asyncio.to_thread(store.branch_costs, since)
+    return JSONResponse({"branches": rows, "since": since})
+
+
+@app.get("/api/branch-history")
+async def branch_history(
+    minutes: float = Query(60.0, gt=0, le=60 * 24 * 90),
+    buckets: int = Query(240, ge=10, le=2000),
+) -> JSONResponse:
+    assert store is not None
+    return JSONResponse(await asyncio.to_thread(store.branch_history, minutes, buckets))
 
 
 @app.get("/api/known")

@@ -25,11 +25,13 @@ function StatusPill({ inst }: { inst: Instance }) {
 
 export function InstanceCard({
   inst,
+  branch,
   color,
   points,
   windowLabel,
 }: {
   inst: Instance;
+  branch: string;
   color: string;
   points: HistoryPoint[];
   windowLabel: string;
@@ -54,22 +56,19 @@ export function InstanceCard({
   const gpuAge = lastGpuTs != null ? Date.now() / 1000 - lastGpuTs : null;
   const gpuStale = inst.gpu_util == null;
 
-  const name = inst.label || `instance ${inst.id}`;
-
   return (
     <div className={`card inst-card${inst.is_running ? "" : " inst-off"}`}>
-      <div className="card-head">
-        <span className="inst-badge" style={{ background: `${color}22`, borderColor: `${color}66`, color }}>
-          {inst.id}
+      {/* Branch first and largest: it is what the reader is tracking. The
+          instance id is a machine detail and sits under it as a mono chip. */}
+      <div className="inst-head">
+        <span className="inst-branch" style={{ color }} title={branch}>
+          {branch}
         </span>
-        <span className="head-right">
-          <StatusPill inst={inst} />
-        </span>
+        <StatusPill inst={inst} />
       </div>
-
-      <div className="inst-title">
-        <span className="inst-name" title={name}>
-          {name}
+      <div className="inst-subhead">
+        <span className="inst-id mono" style={{ borderColor: `${color}55` }}>
+          {inst.id}
         </span>
         <span className="muted small">
           {inst.num_gpus}× {inst.gpu_name ?? "GPU"}

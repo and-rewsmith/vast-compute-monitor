@@ -86,6 +86,29 @@ export interface Fleet {
   net_recv_bps: number;
   net_sent_bps: number;
   idle_dph: number;
+  branches: number;
+}
+
+// A branch is the unit of work: instances are labelled with the branch name and
+// several workers routinely share one, so the label groups rather than names.
+export interface Branch {
+  branch: string;
+  instances: number;
+  running: number;
+  gpus: number;
+  dph_total: number;
+  gpu_util: number | null;
+  ids: number[];
+  started: number | null;
+}
+
+export interface Account {
+  credit: number | null;
+  // Cumulative lifetime spend, reported negative and decreasing. Differenced to
+  // get realized burn; unlike credit it is untouched by autobill top-ups.
+  total_spend: number | null;
+  autobill_threshold: number | null;
+  autobill_amount: number | null;
 }
 
 export interface Snapshot {
@@ -93,9 +116,76 @@ export interface Snapshot {
   ts: number;
   instances: Instance[];
   fleet: Fleet;
+  branches: Branch[];
+  account: Account | null;
   error: string | null;
   stale_since?: number;
   interval: number;
+}
+
+export interface BranchPoint {
+  ts: number;
+  instances: number;
+  gpus: number;
+  gpu_util: number | null;
+  cpu_util: number | null;
+  dph_total: number | null;
+}
+
+export interface BranchHistory {
+  start: number;
+  end: number;
+  minutes: number;
+  bucket_s: number;
+  series: Record<string, BranchPoint[]>;
+}
+
+// One row of the ledger. ACTUAL and REMAINDER are kept apart on purpose and are
+// never summed into a single figure: one is measured, the other is an estimate,
+// and rendering them as one number lends the estimate the measurement's
+// credibility. `project` is false where a forecast would be a fabrication.
+export interface SpendPeriod {
+  key: "hour" | "day" | "week";
+  start: number;
+  end: number;
+  elapsed_s: number;
+  remaining_s: number;
+  period_s: number;
+  actual: number;
+  coverage: number;
+  samples: number;
+  project: boolean;
+  remainder_lo: number | null;
+  remainder_hi: number | null;
+}
+
+export interface TrailingBurn {
+  window_s: number;
+  samples: number;
+  lo: number | null;
+  hi: number | null;
+  mean: number | null;
+}
+
+export interface Spend {
+  now: number;
+  tracking_since: number | null;
+  trailing_burn: TrailingBurn;
+  periods: SpendPeriod[];
+  branch_series: Record<string, BranchPoint[]>;
+  start: number;
+  end: number;
+  bucket_s: number;
+  account_burn: { ts: number; burn_hr: number }[];
+}
+
+export interface BranchCost {
+  label: string;
+  first_seen: number;
+  last_seen: number;
+  instances: number;
+  cost: number;
+  avg_gpu_util: number | null;
 }
 
 export interface HistoryPoint {

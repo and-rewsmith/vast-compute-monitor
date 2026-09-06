@@ -25,17 +25,63 @@ have to be near the GPUs it watches.
 
 ## What it shows
 
-- **GPU and CPU utilization over time**, all instances on one pair of charts,
-  with a selectable window (15m / 1h / 6h / 24h / 7d), crosshair tooltip, legend
-  and direct end-labels.
-- **Per-instance cards** — GPU compute and VRAM dials, temperature, CPU, RAM and
-  disk, utilization sparklines, cost, uptime, location, SSH endpoint and image.
-- **Fleet roll-up** — average GPU/CPU utilization, aggregate VRAM, throughput.
-- **Spend** — $/hour, day, week and 30 days, plus **idle spend**: what you are
-  paying per hour for GPUs that reported under 5% utilization. That number is
-  the reason this dashboard exists.
-- **A sortable table** of every rented instance, which doubles as the
-  no-hover/accessible view of everything the charts plot.
+Instances are labelled with the **branch** they are running, and several workers
+routinely share one label — so the label is a grouping key, not a name, and the
+branch is the unit of display and of cost attribution throughout.
+
+- **Branch rail** — one band per branch: name as the headline, live workers,
+  GPU-weighted utilization, and cost to date. Finished branches keep their band
+  and their final cost, which is the retrospective the persisted history exists
+  for.
+- **GPU and CPU utilization over time**, one line per branch by default (toggle
+  to per-instance), with a selectable window, crosshair tooltip and legend.
+- **Spend over time** — $/hr stacked by branch, with a `now` rule: solid to the
+  left, hatched projection wedge to the right. See "Actual versus projected".
+- **Ledger** — every period split into ACTUAL and REMAINDER, never blended, with
+  a coverage meter saying how much of the period was really observed.
+- **Per-instance cards**, grouped under their branch — GPU and VRAM dials,
+  temperature, CPU, RAM, disk, sparklines, cost, uptime, location, SSH, image.
+- **Fleet roll-up** and **idle spend**: what you pay per hour for GPUs reporting
+  under 5% utilization.
+- **A sortable table** of every rented instance, Branch first, which doubles as
+  the no-hover/accessible view of everything the charts plot.
+
+## Actual versus projected
+
+Two independent spend signals are tracked, and they are never mixed:
+
+| Signal | Source | Accuracy | Decomposable |
+|---|---|---|---|
+| Realized burn | `users/current.total_spend` deltas | Ground truth | No — account-wide |
+| Attributed spend | `dph_total` integrated over time | Estimate | Yes — per branch |
+
+`total_spend` is a cumulative lifetime counter and is the right one to difference:
+unlike `credit` it is untouched by autobill top-ups, which raise the balance
+without being spend. Both were measured moving by identical deltas while
+running, with only `credit` jumping on a top-up.
+
+Rates are measured across a **300s minimum baseline**. Differencing adjacent
+polls aliases against Vast's own update schedule — consecutive readings measured
+$1.30/hr then $2.90/hr while the true rate was a steady $2.26/hr. Neither was
+wrong; they straddled an upstream update.
+
+Forecasting rules, which exist because a confident-looking number beside a
+measured one borrows its credibility:
+
+- Every period shows **actual + remainder** as two figures. Actual wears the
+  strong ink; the remainder stays recessive.
+- The remainder is a **range**, from the trailing realized burn's low and high —
+  never the instantaneous sum of prices, which is a step function that jumps the
+  moment a worker is created or destroyed.
+- **Nothing beyond a day is projected.** A week extrapolated from hours of
+  history is a guess wearing a measurement's clothes, so it is simply not shown.
+- A **coverage meter** marks any period that predates monitoring, so a fragment
+  reads as a fragment rather than a confident under-count.
+- On the chart the projection is a hatched **wedge** between the low and high
+  burn, never a line: the spread is the honest content of the estimate.
+
+Runway is deliberately absent. With autobill on, credit is a sawtooth and
+"hours until zero" answers nothing.
 
 ## Install (systemd user service)
 

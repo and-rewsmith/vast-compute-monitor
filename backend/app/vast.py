@@ -251,6 +251,43 @@ class VastClient:
     def close(self) -> None:
         self._client.close()
 
+    def fetch_account(self) -> tuple[dict | None, str | None]:
+        """Account-level balance and the cumulative spend counter.
+
+        `total_spend` is the ground truth this dashboard bills against. It is a
+        monotonically decreasing lifetime total, and -- unlike `credit` -- it is
+        untouched by autobill top-ups, which lift the balance without being
+        spend. Measured against the live account: credit and total_spend move by
+        identical deltas while running, and only credit jumps on a top-up. So
+        differencing total_spend gives realized dollars/hour with no top-up
+        contamination and no dependence on our own dph integration.
+        """
+        try:
+            resp = self._client.get(f"{API_BASE}/users/current/")
+        except httpx.HTTPError as exc:
+            # JUSTIFICATION FOR NO FAIL-FAST:
+            # Same reasoning as fetch(): a transient upstream failure must not
+            # kill a long-running poller. The instance telemetry is fetched
+            # separately and still succeeds, so the dashboard degrades to
+            # "no new spend reading this tick" rather than going dark.
+            return None, f"{type(exc).__name__}: {exc}"
+        if resp.status_code >= 400:
+            return None, f"Vast API HTTP {resp.status_code} on users/current"
+        try:
+            raw = resp.json()
+        except ValueError as exc:
+            # JUSTIFICATION FOR NO FAIL-FAST: see above -- transient, retried.
+            return None, f"unparseable account response: {exc}"
+
+        return {
+            "credit": _num(raw.get("credit")),
+            # Stored as reported (negative, decreasing). Callers difference it;
+            # nothing depends on the sign convention beyond that.
+            "total_spend": _num(raw.get("total_spend")),
+            "autobill_threshold": _num(raw.get("autobill_threshold")),
+            "autobill_amount": _num(raw.get("autobill_amount")),
+        }, None
+
     def fetch(self) -> tuple[list[dict], str | None]:
         """Return (instances, error). Never raises on a transient API problem.
 

@@ -3,11 +3,12 @@ import type { Instance } from "../types";
 import { duration, pct, rate, usd, utilColor } from "../format";
 
 type Key =
-  | "id" | "status" | "gpu_name" | "gpu_util" | "cpu_util" | "ram_percent"
+  | "label" | "id" | "status" | "gpu_name" | "gpu_util" | "cpu_util" | "ram_percent"
   | "vram_percent" | "disk_percent" | "net_recv_bps" | "dph_total"
   | "uptime_s" | "geolocation";
 
 const COLUMNS: { key: Key; label: string; num: boolean }[] = [
+  { key: "label", label: "Branch", num: false },
   { key: "id", label: "ID", num: false },
   { key: "status", label: "Status", num: false },
   { key: "gpu_name", label: "GPU", num: false },
@@ -28,18 +29,20 @@ const COLUMNS: { key: Key; label: string; num: boolean }[] = [
 export function InstanceTable({
   instances,
   colorFor,
+  branchOf,
 }: {
   instances: Instance[];
   colorFor: (id: number) => string;
+  branchOf: (inst: Instance) => string;
 }) {
-  const [sort, setSort] = useState<Key>("dph_total");
-  const [desc, setDesc] = useState(true);
+  const [sort, setSort] = useState<Key>("label");
+  const [desc, setDesc] = useState(false);
 
   const rows = useMemo(() => {
     const copy = [...instances];
     copy.sort((a, b) => {
-      const av = a[sort] as number | string | null;
-      const bv = b[sort] as number | string | null;
+      const av = (sort === "label" ? branchOf(a) : a[sort]) as number | string | null;
+      const bv = (sort === "label" ? branchOf(b) : b[sort]) as number | string | null;
       if (av == null && bv == null) return 0;
       if (av == null) return 1;
       if (bv == null) return -1;
@@ -49,7 +52,7 @@ export function InstanceTable({
       return desc ? -cmp : cmp;
     });
     return copy;
-  }, [instances, sort, desc]);
+  }, [instances, sort, desc, branchOf]);
 
   const click = (k: Key) => {
     if (k === sort) setDesc((d) => !d);
@@ -84,11 +87,11 @@ export function InstanceTable({
           <tbody>
             {rows.map((i) => (
               <tr key={i.id}>
-                <td>
+                <td className="branch-cell" title={branchOf(i)}>
                   <span className="row-key" style={{ background: colorFor(i.id) }} />
-                  <span className="mono">{i.id}</span>
-                  {i.label ? <span className="muted"> · {i.label}</span> : null}
+                  {branchOf(i)}
                 </td>
+                <td className="mono muted">{i.id}</td>
                 <td>
                   <span className={`pill ${i.is_running ? "ok" : "off"}`}>{i.status}</span>
                 </td>

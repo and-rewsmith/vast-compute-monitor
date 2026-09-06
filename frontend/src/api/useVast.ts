@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { History, HistoryPoint, Info, Snapshot } from "../types";
+import type {
+  BranchCost,
+  BranchHistory,
+  BranchPoint,
+  History,
+  HistoryPoint,
+  Info,
+  Snapshot,
+  Spend,
+} from "../types";
 
 export type ConnState = "connecting" | "open" | "closed";
 
@@ -139,6 +148,145 @@ export function useHistory(minutes: number, snapshot: Snapshot | null) {
   }, [snapshot?.ts, history !== null]);
 
   return { history, loading, refetch };
+}
+
+export type GroupMode = "branch" | "instance";
+
+// Per-branch utilization history. Same contract as useHistory (fetch on window
+// change, append live snapshots, periodic refetch to re-form buckets) but keyed
+// by branch, which is what the charts plot by default: three workers on one
+// branch drew three identical lines, and one line with the branch name on it is
+// the signal.
+export function useBranchHistory(minutes: number, snapshot: Snapshot | null, enabled: boolean) {
+  const [history, setHistory] = useState<BranchHistory | null>(null);
+  const [loading, setLoading] = useState(true);
+  const lastAppended = useRef<number>(0);
+
+  const refetch = useCallback(async () => {
+    if (!enabled) return;
+    try {
+      const r = await fetch(`/api/branch-history?minutes=${minutes}&buckets=240`);
+      const data: BranchHistory = await r.json();
+      setHistory(data);
+      lastAppended.current = data.end;
+    } catch {
+      // Leave the previous render up; the next periodic refetch retries.
+    } finally {
+      setLoading(false);
+    }
+  }, [minutes, enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    setLoading(true);
+    refetch();
+  }, [refetch, enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const period = Math.max(30_000, ((minutes * 60) / 240) * 1000);
+    const id = window.setInterval(refetch, period);
+    return () => window.clearInterval(id);
+  }, [refetch, minutes, enabled]);
+
+  useEffect(() => {
+    if (!enabled || !snapshot || snapshot.error || !history) return;
+    if (snapshot.ts <= lastAppended.current) return;
+    lastAppended.current = snapshot.ts;
+    setHistory((prev) => {
+      if (!prev) return prev;
+      const series: Record<string, BranchPoint[]> = { ...prev.series };
+      for (const b of snapshot.branches) {
+        const point: BranchPoint = {
+          ts: snapshot.ts,
+          instances: b.instances,
+          gpus: b.gpus,
+          gpu_util: b.gpu_util,
+          // The live snapshot carries no per-branch CPU roll-up, so the tail of
+          // the CPU series is computed here from the instances in this branch --
+          // GPU-weighted, matching how the server aggregates it.
+          cpu_util: weightedCpu(snapshot, b.ids),
+          dph_total: b.dph_total,
+        };
+        series[b.branch] = (series[b.branch] ?? []).concat(point);
+      }
+      return { ...prev, series, end: snapshot.ts };
+    });
+  }, [snapshot?.ts, history !== null, enabled]);
+
+  return { history, loading, refetch };
+}
+
+function weightedCpu(snapshot: Snapshot, ids: number[]): number | null {
+  let num = 0;
+  let den = 0;
+  for (const id of ids) {
+    const inst = snapshot.instances.find((i) => i.id === id);
+    if (!inst || !inst.is_running || inst.cpu_util == null) continue;
+    num += inst.cpu_util * inst.num_gpus;
+    den += inst.num_gpus;
+  }
+  return den ? num / den : null;
+}
+
+// The ledger + spend chart. Refetched on a timer rather than appended live: the
+// periods are clock-bounded and the burn series is deliberately resampled onto a
+// coarse baseline server-side, so there is no meaningful per-tick tail to add.
+export function useSpend(minutes: number, snapshot: Snapshot | null) {
+  const [spend, setSpend] = useState<Spend | null>(null);
+
+  const refetch = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/spend?minutes=${minutes}`);
+      setSpend(await r.json());
+    } catch {
+      // Keep the last ledger on screen; the next tick retries.
+    }
+  }, [minutes]);
+
+  useEffect(() => {
+    refetch();
+  }, [refetch]);
+
+  useEffect(() => {
+    const id = window.setInterval(refetch, 60_000);
+    return () => window.clearInterval(id);
+  }, [refetch]);
+
+  // Nudge the ledger when the fleet's price changes -- adding or dropping a
+  // worker is exactly when the numbers stop being current.
+  const dph = snapshot?.fleet.dph_total ?? 0;
+  useEffect(() => {
+    refetch();
+  }, [dph]);
+
+  return { spend, refetch };
+}
+
+// Branch lifecycle + integrated cost, including branches that have finished.
+export function useBranchCosts(days: number, snapshot: Snapshot | null) {
+  const [branches, setBranches] = useState<BranchCost[]>([]);
+  const refetch = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/branches?days=${days}`);
+      const d = await r.json();
+      setBranches(d.branches ?? []);
+    } catch {
+      // Previous list stays; retried on the next interval.
+    }
+  }, [days]);
+  useEffect(() => {
+    refetch();
+  }, [refetch]);
+  useEffect(() => {
+    const id = window.setInterval(refetch, 60_000);
+    return () => window.clearInterval(id);
+  }, [refetch]);
+  const n = snapshot?.instances.length ?? 0;
+  useEffect(() => {
+    refetch();
+  }, [n]);
+  return branches;
 }
 
 export function useInfo() {

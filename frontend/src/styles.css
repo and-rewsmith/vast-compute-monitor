@@ -220,3 +220,121 @@ body {
   .summary-row { grid-template-columns: 1fr; }
   .mini-table { min-width: 900px; }
 }
+
+/* ============================================================================
+   Branch rail. The label is the headline: instances are labelled with the
+   branch they run, several workers share one label, and so the branch -- not
+   the instance -- is the unit of work, of display and of cost attribution.
+   ============================================================================ */
+.branch-card { padding-bottom: 12px; }
+.branch-list { display: flex; flex-direction: column; gap: 10px; }
+.branch-band {
+  background: var(--panel-2); border-radius: 8px;
+  border-left: 3px solid var(--border);
+  padding: 10px 14px; display: flex; flex-direction: column; gap: 8px;
+}
+/* A finished branch keeps its row and its final cost -- that retrospective is
+   why the history is persisted -- but recedes so the eye goes to what is live. */
+.branch-done { opacity: 0.62; }
+.branch-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.branch-name {
+  font-size: 17px; font-weight: 700; letter-spacing: 0.01em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
+}
+.branch-facts { margin-left: auto; }
+.branch-body { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; }
+.branch-util { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.branch-util-track { flex: 1; height: 10px; background: #0d1117; border-radius: 5px; overflow: hidden; min-width: 60px; }
+.branch-util-fill { height: 100%; transition: width 0.4s ease, background 0.4s; }
+.branch-util-val { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+.branch-cost { display: flex; flex-direction: column; align-items: flex-end; }
+.branch-cost-val { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.branch-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.branch-chip { font-size: 11px; border: 1px solid; border-radius: 5px; padding: 1px 7px; }
+
+/* Instance cards grouped under their branch. */
+.inst-groups { display: flex; flex-direction: column; gap: 16px; }
+.inst-group { display: flex; flex-direction: column; gap: 10px; }
+.group-head { display: flex; align-items: center; gap: 9px; }
+.group-key { width: 14px; height: 3px; border-radius: 2px; }
+.group-name { font-size: 14px; font-weight: 700; }
+
+.inst-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.inst-branch {
+  font-size: 15px; font-weight: 700; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.inst-subhead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.inst-id {
+  font-size: 11.5px; color: var(--muted); border: 1px solid; border-radius: 5px; padding: 0 6px;
+}
+
+/* ---- spend ---------------------------------------------------------------- */
+.spend-row { display: grid; grid-template-columns: 1.5fr 1fr; gap: 14px; align-items: start; }
+.spend-key { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 6px; }
+.key-swatch { width: 14px; height: 9px; border-radius: 2px; display: inline-block; margin-left: 8px; }
+.key-swatch:first-child { margin-left: 0; }
+.key-actual { background: #6095fa; opacity: 0.55; }
+.key-truth { background: var(--text); height: 2px; border-radius: 1px; }
+.key-proj { background: repeating-linear-gradient(45deg, #8b949e, #8b949e 1.5px, transparent 1.5px, transparent 4px); border: 1px dashed #8b949e; }
+.tchart-tip-total { border-top: 1px solid var(--border); margin-top: 3px; padding-top: 3px; }
+
+/* ---- ledger --------------------------------------------------------------- */
+.ledger-card { display: flex; flex-direction: column; }
+.ledger-grid { display: flex; flex-direction: column; gap: 2px; }
+.ledger-head, .ledger-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 78px 116px 62px;
+  gap: 10px; align-items: baseline; padding: 5px 8px; font-size: 12.5px;
+}
+.ledger-head {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em;
+  color: var(--muted); font-weight: 700;
+}
+.ledger-row { background: var(--panel-2); border-radius: 5px; }
+.ledger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Actual is measured, so it wears the Strong ink. The remainder is an estimate
+   and stays recessive -- rendering them at equal weight would lend the estimate
+   the measurement's credibility, which is the whole failure mode here. */
+.ledger-actual { font-weight: 700; font-variant-numeric: tabular-nums; }
+.ledger-rem { color: var(--muted); font-variant-numeric: tabular-nums; }
+.rem-range { white-space: nowrap; font-size: 11.5px; }
+.ledger-note { margin-top: 6px; line-height: 1.5; }
+.ledger-foot {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+  border-top: 1px solid var(--border); margin-top: 12px; padding-top: 10px;
+}
+.ledger-foot .stat-value { font-size: 16px; }
+
+.cov { display: inline-flex; align-items: center; gap: 5px; justify-content: flex-end; }
+.cov-track { width: 26px; height: 5px; background: #0d1117; border-radius: 3px; overflow: hidden; }
+.cov-fill { display: block; height: 100%; background: var(--muted); }
+.cov-num { font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.branch-cell { font-weight: 600; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 900px) {
+  .spend-row { grid-template-columns: 1fr; }
+  .fleet-inner { flex-direction: column; align-items: stretch; gap: 12px; }
+  .fleet-card .gpu-gauges { justify-content: space-around; }
+  .fleet-card .gpu-stats {
+    padding-left: 0; padding-top: 10px;
+    border-left: none; border-top: 1px solid var(--border);
+  }
+  .branch-body { grid-template-columns: 1fr; align-items: start; gap: 8px; }
+  .branch-cost { align-items: flex-start; }
+}
+
+/* Proportion fixes: a progress bar stretched across 1200px reads as a loading
+   indicator rather than a measurement, and three gauges spread across a
+   full-width card lose their relationship to each other. */
+.branch-util { max-width: 560px; }
+.branch-unlabeled { border-left-style: dashed; }
+/* Fleet reads as one strip: dials on the left, the secondary numbers beside
+   them behind a rule. Two centred rows in a full-width card left most of the
+   card empty and broke the relationship between the two groups. */
+.fleet-inner { display: flex; align-items: center; gap: 28px; }
+.fleet-card .gpu-gauges { flex: 0 0 auto; gap: 18px; justify-content: flex-start; }
+.fleet-card .gpu-stats {
+  flex: 1; margin-top: 0; padding-top: 0; padding-left: 28px;
+  border-top: none; border-left: 1px solid var(--border);
+}
