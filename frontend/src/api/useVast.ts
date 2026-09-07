@@ -283,18 +283,21 @@ export function useSpend(minutes: number, snapshot: Snapshot | null) {
   return { spend, refetch };
 }
 
-// Branch lifecycle + integrated cost, including branches that have finished.
-export function useBranchCosts(days: number, snapshot: Snapshot | null) {
+// Branch lifecycle + in-window cost, including branches that have finished.
+// Scoped to the selector like everything else on the page: the rail sits above
+// charts covering the same window, so a branch that finished outside it does
+// not belong on screen.
+export function useBranchCosts(minutes: number, snapshot: Snapshot | null) {
   const [branches, setBranches] = useState<BranchCost[]>([]);
   const refetch = useCallback(async () => {
     try {
-      const r = await fetch(`/api/branches?days=${days}`);
+      const r = await fetch(`/api/branches?minutes=${minutes}`);
       const d = await r.json();
       setBranches(d.branches ?? []);
     } catch {
       // Previous list stays; retried on the next interval.
     }
-  }, [days]);
+  }, [minutes]);
   useEffect(() => {
     refetch();
   }, [refetch]);

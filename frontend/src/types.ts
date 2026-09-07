@@ -190,9 +190,17 @@ export interface Spend {
 
 export interface BranchCost {
   label: string;
+  // Lifecycle *within the selected window*.
   first_seen: number;
   last_seen: number;
+  // Lifecycle across everything retained, regardless of window.
+  first_seen_all: number | null;
+  last_seen_all: number | null;
+  // The branch was already running when the window opened, so `cost` covers
+  // only part of its life and must not be read as a lifetime total.
+  truncated: boolean;
   instances: number;
+  // Cost accrued inside the window, not over the branch's lifetime.
   cost: number;
   avg_gpu_util: number | null;
 }

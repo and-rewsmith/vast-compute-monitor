@@ -408,16 +408,41 @@ class Store:
     # ------------------------------------------------------------ attribution
 
     def branch_costs(self, since: float | None = None) -> list[dict]:
-        """Per-branch integrated cost, plus lifecycle timestamps.
+        """Per-branch integrated cost and lifecycle, restricted to a window.
 
         Cost is a Riemann sum over each instance's own samples: price at a
         sample multiplied by the interval to the NEXT sample. The interval is
         capped, so a stretch where the poller was down contributes nothing
         rather than billing hours nobody observed -- undercounting a gap is
         honest, inventing spend through it is not.
+
+        Because the window filters the samples, the cost returned is the cost
+        INSIDE the window, not the branch's lifetime total. A branch that was
+        already running when the window opened would otherwise show a total that
+        silently means something different from the one beside it. So the full
+        extent is reported alongside it and the caller can say which is which.
         """
         cap = self.interval * MAX_CHARGE_GAP_INTERVALS
-        params: dict = {"cap": cap, "unlabeled": UNLABELED, "since": since if since is not None else 0.0}
+        since_v = since if since is not None else 0.0
+        params: dict = {"cap": cap, "unlabeled": UNLABELED, "since": since_v}
+
+        # Full extent, ignoring the window, so a windowed row can be marked as
+        # the fragment it is.
+        with self._lock:
+            extent = {
+                r["label"]: (r["first_seen_all"], r["last_seen_all"])
+                for r in self._db.execute(
+                    """
+                    SELECT COALESCE(label, :unlabeled) AS label,
+                           MIN(ts) AS first_seen_all,
+                           MAX(ts) AS last_seen_all
+                      FROM samples
+                  GROUP BY COALESCE(label, :unlabeled)
+                    """,
+                    {"unlabeled": UNLABELED},
+                ).fetchall()
+            }
+
         with self._lock:
             rows = self._db.execute(
                 """
@@ -441,7 +466,18 @@ class Store:
                 """,
                 params,
             ).fetchall()
-        return [dict(r) for r in rows]
+
+        out = []
+        for r in rows:
+            d = dict(r)
+            first_all, last_all = extent.get(d["label"], (d["first_seen"], d["last_seen"]))
+            d["first_seen_all"] = first_all
+            d["last_seen_all"] = last_all
+            # True when the branch was already running before the window opened,
+            # so the cost above covers only part of its life.
+            d["truncated"] = first_all is not None and first_all < since_v - 1.0
+            out.append(d)
+        return out
 
     # ------------------------------------------------------------------ spend
 

@@ -39,7 +39,42 @@ from dataclasses import dataclass, field
 
 ENABLED = os.environ.get("VASTMON_SSH_PROBE", "1") not in ("0", "false", "no")
 SSH_USER = os.environ.get("VASTMON_SSH_USER", "root")
-SSH_KEY = os.environ.get("VASTMON_SSH_KEY", os.path.expanduser("~/.ssh/id_ed25519"))
+
+
+def _discover_keys() -> list[str]:
+    """Every candidate private key, most-recently-modified first.
+
+    Multiple keys are offered because Vast bakes the account's registered key
+    into an instance at CREATION time, so a fleet built over several days does
+    not share one key. Measured: instances created yesterday accept
+    ~/.ssh/id_ed25519 and refuse ~/.ssh/id_macbook, while instances created
+    today do the exact opposite. Pinning a single key leaves half the fleet
+    reporting "Permission denied" and silently losing its per-GPU detail.
+
+    VASTMON_SSH_KEY overrides with a comma-separated list, in order.
+    """
+    override = os.environ.get("VASTMON_SSH_KEY", "").strip()
+    if override:
+        return [os.path.expanduser(k.strip()) for k in override.split(",") if k.strip()]
+
+    ssh_dir = os.path.expanduser("~/.ssh")
+    if not os.path.isdir(ssh_dir):
+        return []
+    found = []
+    for name in os.listdir(ssh_dir):
+        if not name.startswith("id_") or name.endswith(".pub"):
+            continue
+        path = os.path.join(ssh_dir, name)
+        if os.path.isfile(path):
+            found.append(path)
+    # Newest first: a key added recently is the one most likely to match the
+    # instances created recently. Capped because sshd's MaxAuthTries (6 by
+    # default) will drop the connection if we offer more identities than that.
+    found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return found[:4]
+
+
+SSH_KEYS = _discover_keys()
 PROBE_TIMEOUT = float(os.environ.get("VASTMON_PROBE_TIMEOUT", "12"))
 PROBE_WORKERS = int(os.environ.get("VASTMON_PROBE_WORKERS", "8"))
 # Connections are held open this long between probes, so a steady cadence keeps
@@ -103,25 +138,35 @@ class GpuProbe:
 
     @property
     def available(self) -> bool:
-        return ENABLED and self._ssh is not None and os.path.isfile(SSH_KEY)
+        return ENABLED and self._ssh is not None and bool(SSH_KEYS)
 
     def unavailable_reason(self) -> str | None:
         if not ENABLED:
             return "per-GPU probe disabled (VASTMON_SSH_PROBE=0)"
         if self._ssh is None:
             return "ssh not found on PATH"
-        if not os.path.isfile(SSH_KEY):
-            return f"ssh key not found at {SSH_KEY}"
+        if not SSH_KEYS:
+            return "no ssh private keys found in ~/.ssh (set VASTMON_SSH_KEY)"
         return None
+
+    @property
+    def keys(self) -> list[str]:
+        return list(SSH_KEYS)
 
     def _cmd(self, host: str, port: int) -> list[str]:
         assert self._ssh is not None
+        keys: list[str] = []
+        for k in SSH_KEYS:
+            keys += ["-i", k]
         return [
             self._ssh,
             "-p", str(port),
             "-o", "BatchMode=yes",
+            # IdentitiesOnly keeps ssh to exactly the keys listed here, so an
+            # agent full of unrelated identities cannot exhaust MaxAuthTries
+            # before our candidates are offered.
             "-o", "IdentitiesOnly=yes",
-            "-i", SSH_KEY,
+            *keys,
             "-o", "StrictHostKeyChecking=accept-new",
             f"-o", f"ConnectTimeout={int(PROBE_TIMEOUT)}",
             # Multiplexing: the expensive part of an SSH probe is the handshake,

@@ -55,7 +55,7 @@ export default function App() {
   const instHistory = useHistory(minutes, snapshot);
   const branchHistory = useBranchHistory(minutes, snapshot, group === "branch");
   const { spend } = useSpend(minutes, snapshot);
-  const branchCosts = useBranchCosts(7, snapshot);
+  const branchCosts = useBranchCosts(minutes, snapshot);
   const gpuHistory = useGpuHistory(minutes, snapshot);
 
   useEffect(() => {
@@ -235,7 +235,8 @@ export default function App() {
             costs={branchCosts}
             colorFor={colorForBranch}
             now={now}
-            trackingSince={spend?.tracking_since ?? null}
+            windowLabel={windowLabel}
+            windowStart={now - minutes * 60}
           />
 
           <section className="chart-row">

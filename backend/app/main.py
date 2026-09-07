@@ -286,6 +286,7 @@ async def info() -> JSONResponse:
             "gpu_probe": {
                 "available": probe.available if probe else False,
                 "reason": probe.unavailable_reason() if probe else "not started",
+                "keys": [k.split("/")[-1] for k in probe.keys] if probe else [],
             },
         }
     )
@@ -383,16 +384,18 @@ async def gpu_history(
 
 
 @app.get("/api/branches")
-async def branches(days: float = Query(7.0, gt=0)) -> JSONResponse:
-    """Branch lifecycle and integrated cost, including finished branches.
+async def branches(minutes: float = Query(1440.0, gt=0, le=60 * 24 * 90)) -> JSONResponse:
+    """Branch lifecycle and integrated cost, scoped to the requested window.
 
-    A branch that ended this morning keeps its row -- with what it cost -- which
-    is the whole reason the history is persisted.
+    Scoped, not lifetime: the rail is read alongside charts that show the same
+    window, and a branch that finished outside it does not belong on the page.
+    Costs are therefore in-window costs, and rows carry `truncated` when the
+    branch predates the window so the UI can say the figure is partial.
     """
     assert store is not None
-    since = time.time() - days * 86400.0
+    since = time.time() - minutes * 60.0
     rows = await asyncio.to_thread(store.branch_costs, since)
-    return JSONResponse({"branches": rows, "since": since})
+    return JSONResponse({"branches": rows, "since": since, "minutes": minutes})
 
 
 @app.get("/api/branch-history")

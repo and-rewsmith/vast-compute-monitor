@@ -49,7 +49,11 @@ branch is the unit of display and of cost attribution throughout.
   the no-hover/accessible view of everything the charts plot.
 
 Every chart and sparkline follows the window selector, up to **30d** — the same
-as the store's retention, so the selector reaches everything that is kept.
+as the store's retention, so the selector reaches everything that is kept. The
+branch rail follows it too: a branch that finished outside the window is not
+shown, and the cost on a band is the cost *inside* the window. A branch that was
+already running when the window opened is marked "started earlier", so a partial
+figure is never read as a lifetime total.
 
 ## Per-GPU telemetry, and why it needs SSH
 
@@ -80,10 +84,19 @@ The backend therefore runs `nvidia-smi` on each running instance over SSH.
   averaged number and *says so* — labelled "avg of N" rather than dressed up as
   per-GPU detail that was never measured.
 
-Config: `VASTMON_SSH_PROBE=0` disables it entirely; `VASTMON_SSH_KEY`
-(default `~/.ssh/id_ed25519`), `VASTMON_SSH_USER` (default `root`),
+**Several keys are offered, not one.** Vast bakes the account's registered key
+into an instance at *creation* time, so a fleet built over several days does not
+share a key: instances created one day accepted `~/.ssh/id_ed25519` and refused
+`~/.ssh/id_macbook`, while instances created the next did exactly the opposite.
+The probe therefore offers every private key in `~/.ssh` (newest first, capped
+at four so sshd's `MaxAuthTries` cannot drop the connection before the right one
+is tried).
+
+Config: `VASTMON_SSH_PROBE=0` disables it entirely; `VASTMON_SSH_KEY` overrides
+key discovery with a comma-separated list; `VASTMON_SSH_USER` (default `root`),
 `VASTMON_PROBE_TIMEOUT`, `VASTMON_PROBE_WORKERS`, `VASTMON_PROBE_PERSIST`.
-`/api/info` reports whether the probe is available and why not.
+`/api/info` reports whether the probe is available, why not, and which keys it
+is offering.
 
 The top-of-page utilization charts and the branch rail still use Vast's
 per-instance numbers, so a fleet-level average there can differ from the
