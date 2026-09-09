@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Spend } from "../types";
+import { localX } from "./pointer";
 import { clockLabel, usd } from "../format";
 
 const PAD = { top: 10, right: 18, bottom: 22, left: 44 };
@@ -57,11 +58,31 @@ export function SpendChart({
 
   // Union of bucket timestamps across branches, so the stack is well-defined
   // even when one branch started mid-window.
+  //
+  // Where NO branch has a bucket -- nothing was rented for a stretch -- two
+  // synthetic zero stamps are inserted at the edges of the gap. Without them
+  // the polygon runs straight from the last reading to the next one, drawing a
+  // smooth ramp across hours when the fleet was empty and implying spend that
+  // never happened. Dropping to zero and back is what actually occurred.
   const stamps = useMemo(() => {
     const set = new Set<number>();
     for (const b of branches) for (const p of spend.branch_series[b]) set.add(p.ts);
-    return [...set].sort((a, b) => a - b);
-  }, [branches, spend.branch_series]);
+    const real = [...set].sort((a, b) => a - b);
+    const bucket = spend.bucket_s || 60;
+    const out: number[] = [];
+    const synthetic = new Set<number>();
+    for (let i = 0; i < real.length; i++) {
+      if (i > 0 && real[i] - real[i - 1] > bucket * 2.5) {
+        const lo = real[i - 1] + bucket * 0.5;
+        const hi = real[i] - bucket * 0.5;
+        out.push(lo, hi);
+        synthetic.add(lo);
+        synthetic.add(hi);
+      }
+      out.push(real[i]);
+    }
+    return { list: out, synthetic };
+  }, [branches, spend.branch_series, spend.bucket_s]);
 
   const valueAt = useMemo(() => {
     const maps = new Map<string, Map<number, number>>();
@@ -72,7 +93,7 @@ export function SpendChart({
   }, [branches, spend.branch_series]);
 
   const stackTops = useMemo(
-    () => stamps.map((ts) => branches.reduce((acc, b) => acc + (valueAt.get(b)!.get(ts) ?? 0), 0)),
+    () => stamps.list.map((ts) => branches.reduce((acc, b) => acc + (valueAt.get(b)!.get(ts) ?? 0), 0)),
     [stamps, branches, valueAt],
   );
 
@@ -91,15 +112,16 @@ export function SpendChart({
 
   // Stacked areas, bottom band first.
   const bands = useMemo(() => {
-    let below = stamps.map(() => 0);
+    const list = stamps.list;
+    let below = list.map(() => 0);
     return branches.map((b) => {
       const m = valueAt.get(b)!;
-      const top = stamps.map((ts, i) => below[i] + (m.get(ts) ?? 0));
+      const top = list.map((ts, i) => below[i] + (m.get(ts) ?? 0));
       const d =
-        stamps.length < 2
+        list.length < 2
           ? ""
-          : `M${stamps.map((ts, i) => `${x(ts).toFixed(1)},${y(top[i]).toFixed(1)}`).join(" L")} ` +
-            `L${[...stamps]
+          : `M${list.map((ts, i) => `${x(ts).toFixed(1)},${y(top[i]).toFixed(1)}`).join(" L")} ` +
+            `L${[...list]
               .map((ts, i) => ({ ts, i }))
               .reverse()
               .map(({ ts, i }) => `${x(ts).toFixed(1)},${y(below[i]).toFixed(1)}`)
@@ -129,13 +151,19 @@ export function SpendChart({
   }, [start, span, plotW]);
 
   const hover = useMemo(() => {
-    if (hoverX == null || !stamps.length) return null;
+    if (hoverX == null || !stamps.list.length) return null;
     const ts = start + ((hoverX - PAD.left) / plotW) * span;
     if (ts > now) return null;
-    let best = stamps[0];
-    for (const s of stamps) if (Math.abs(s - ts) < Math.abs(best - ts)) best = s;
+    // Never snap to a synthetic gap marker: it is a drawing artefact, not a
+    // reading, and reporting $0.00 at it would look like a measurement.
+    let best: number | null = null;
+    for (const s of stamps.list) {
+      if (stamps.synthetic.has(s)) continue;
+      if (best === null || Math.abs(s - ts) < Math.abs(best - ts)) best = s;
+    }
+    if (best === null) return null;
     const rows = branches
-      .map((b) => ({ branch: b, v: valueAt.get(b)!.get(best) ?? 0, color: colorFor(b) }))
+      .map((b) => ({ branch: b, v: valueAt.get(b)!.get(best!) ?? 0, color: colorFor(b) }))
       .filter((r) => r.v > 0);
     return { ts: best, rows, total: rows.reduce((a, r) => a + r.v, 0) };
   }, [hoverX, stamps, branches, valueAt, start, span, plotW, now]);
@@ -145,10 +173,7 @@ export function SpendChart({
       <svg
         width={width}
         height={height}
-        onPointerMove={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          setHoverX(e.clientX - r.left);
-        }}
+        onPointerMove={(e) => setHoverX(localX(e, width))}
         onPointerLeave={() => setHoverX(null)}
       >
         <defs>
@@ -234,13 +259,23 @@ export function SpendChart({
         </div>
       )}
 
+      {/* The stack is drawn in one colour per branch, so the key names them.
+          A single swatch captioned "spend by branch" told the reader nothing
+          about which colour was which. */}
       <div className="spend-key muted small">
-        <span className="key-swatch key-actual" /> spend by branch
-        <span className="key-swatch key-truth" /> total Vast actually charged
+        {branches.map((b) => (
+          <span key={b} className="key-item">
+            <span className="key-swatch" style={{ background: colorFor(b), opacity: 0.75 }} />
+            {b}
+          </span>
+        ))}
+        <span className="key-item">
+          <span className="key-swatch key-truth" /> total Vast charged
+        </span>
         {trailing.hi != null && (
-          <>
+          <span className="key-item">
             <span className="key-swatch key-proj" /> projected range
-          </>
+          </span>
         )}
       </div>
     </div>

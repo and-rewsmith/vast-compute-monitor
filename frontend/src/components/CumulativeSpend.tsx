@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Spend } from "../types";
+import { localX } from "./pointer";
 import { clockLabel, usd } from "../format";
 
 const PAD = { top: 10, right: 16, bottom: 22, left: 52 };
@@ -51,21 +52,24 @@ export function CumulativeSpend({
     return [...set].sort((a, b) => a - b);
   }, [branches, spend.branch_series]);
 
-  // Integrate each branch's price over the buckets: rate x elapsed time. The
-  // running total only advances while a branch is actually present, so a branch
-  // that finished mid-window flattens out instead of continuing to climb.
+  // Running sum of the per-bucket cost the SERVER integrated. Deliberately not
+  // rate x bucket-spacing computed here: the client only has bucket midpoints,
+  // so across a gap where a branch was not running that inference is wildly
+  // wrong. A branch idle for 601 minutes and resuming at $2.681/hr had ~$26.89
+  // of spend invented for hours it did not exist, pushing the total far above
+  // what Vast actually charged. The server caps the interval per sample, so the
+  // curve here agrees with the branch rail and with the ledger by construction.
   const cumulative = useMemo(() => {
-    const rate = new Map<string, Map<number, number>>();
+    const cost = new Map<string, Map<number, number>>();
     for (const b of branches) {
-      rate.set(b, new Map(spend.branch_series[b].map((p) => [p.ts, p.dph_total ?? 0])));
+      cost.set(b, new Map(spend.branch_series[b].map((p) => [p.ts, p.cost ?? 0])));
     }
     const out = new Map<string, number[]>();
     for (const b of branches) {
       const totals: number[] = [];
       let acc = 0;
-      for (let i = 0; i < stamps.length; i++) {
-        const dt = i === 0 ? 0 : stamps[i] - stamps[i - 1];
-        acc += ((rate.get(b)!.get(stamps[i]) ?? 0) * dt) / 3600;
+      for (const ts of stamps) {
+        acc += cost.get(b)!.get(ts) ?? 0;
         totals.push(acc);
       }
       out.set(b, totals);
@@ -148,10 +152,7 @@ export function CumulativeSpend({
       <svg
         width={width}
         height={height}
-        onPointerMove={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          setHoverX(e.clientX - r.left);
-        }}
+        onPointerMove={(e) => setHoverX(localX(e, width))}
         onPointerLeave={() => setHoverX(null)}
       >
         {[0, 0.25, 0.5, 0.75, 1].map((f) => (
@@ -204,8 +205,15 @@ export function CumulativeSpend({
       )}
 
       <div className="spend-key muted small">
-        <span className="key-swatch key-actual" /> by branch
-        <span className="key-swatch key-truth" /> total Vast actually charged
+        {branches.map((b) => (
+          <span key={b} className="key-item">
+            <span className="key-swatch" style={{ background: colorFor(b), opacity: 0.75 }} />
+            {b}
+          </span>
+        ))}
+        <span className="key-item">
+          <span className="key-swatch key-truth" /> total Vast charged
+        </span>
       </div>
     </div>
   );

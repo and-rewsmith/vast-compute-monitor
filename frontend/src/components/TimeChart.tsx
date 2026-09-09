@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { localX } from "./pointer";
 import { clockLabel } from "../format";
 
 export interface ChartSeries {
@@ -191,10 +192,7 @@ export function TimeChart({
         width={width}
         height={height}
         role="img"
-        onPointerMove={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          setHoverX(e.clientX - r.left);
-        }}
+        onPointerMove={(e) => setHoverX(localX(e, width))}
         onPointerLeave={() => setHoverX(null)}
       >
         {yTicks.map((v, i) => (

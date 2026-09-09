@@ -156,6 +156,10 @@ export interface BranchPoint {
   // Pooled across the branch's workers: total VRAM held over total allotted.
   vram_percent: number | null;
   dph_total: number | null;
+  // Dollars accrued inside this bucket, integrated server-side with a capped
+  // interval. Never re-derive this from dph and bucket spacing: across a gap
+  // where the branch was not running that inference invents spend.
+  cost: number | null;
 }
 
 export interface BranchHistory {

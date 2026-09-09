@@ -213,6 +213,10 @@ export function useBranchHistory(minutes: number, snapshot: Snapshot | null, ena
           cpu_util: weightedCpu(snapshot, b.ids),
           vram_percent: pooledVram(snapshot, b.ids),
           dph_total: b.dph_total,
+          // Cost for the live tail point: one poll's worth at the current
+          // price. Bounded by the poll interval, so appending it cannot invent
+          // spend the way multiplying a rate across a gap would.
+          cost: (b.dph_total * (snapshot.interval || 30)) / 3600,
         };
         series[b.branch] = (series[b.branch] ?? []).concat(point);
       }

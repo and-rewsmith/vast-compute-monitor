@@ -328,17 +328,27 @@ class Store:
         }
 
     def branch_history(self, minutes: float, buckets: int) -> dict:
-        """Downsampled per-BRANCH series: utilization weighted by GPU count.
+        """Downsampled per-BRANCH series: utilization weighted by GPU count, and
+        the dollars actually accrued inside each bucket.
 
         A branch is a set of workers, so its utilization is the GPU-weighted
         mean of theirs -- a 2-GPU worker at 90% next to a 1-GPU worker at 30% is
         a 70% branch, not a 60% one. The weighted mean is built in two stages so
         that an instance sampled twice inside one bucket does not count twice:
         average per instance first, then combine across the branch.
+
+        `cost` is integrated HERE, not by the client. The client only has bucket
+        midpoints, so it would have to infer the elapsed time between them --
+        and across a gap where the branch was not running that inference is
+        catastrophically wrong: a branch idle for 601 minutes and resuming at
+        $2.681/hr had ~$26.89 of spend invented for hours it did not exist. The
+        same capped Riemann sum as `branch_costs` is used, so the chart, the
+        rail and the ledger cannot disagree.
         """
         now = time.time()
         start = now - minutes * 60.0
         bucket_s = max(1.0, (minutes * 60.0) / max(1, buckets))
+        cap = self.interval * MAX_CHARGE_GAP_INTERVALS
 
         with self._lock:
             rows = self._db.execute(
@@ -353,27 +363,36 @@ class Store:
                        SUM(CASE WHEN cpu_util IS NOT NULL THEN cpu_util * w END)
                          / NULLIF(SUM(CASE WHEN cpu_util IS NOT NULL THEN w END), 0) AS cpu_util,
                        SUM(dph) AS dph_total,
+                       SUM(cost) AS cost,
                        SUM(vram_used) AS vram_used_gb,
                        SUM(vram_total) AS vram_total_gb
                   FROM (
-                        SELECT COALESCE(label, :unlabeled) AS label,
+                        SELECT label,
                                instance_id,
-                               CAST((ts - :start) / :bucket AS INTEGER) AS b,
+                               b,
                                MIN(ts) AS ts,
                                AVG(gpu_util) AS gpu_util,
                                AVG(cpu_util) AS cpu_util,
                                AVG(dph_total) AS dph,
                                AVG(vram_used_gb) AS vram_used,
                                AVG(vram_total_gb) AS vram_total,
-                               COALESCE(MAX(num_gpus), 1) AS w
-                          FROM samples
-                         WHERE ts >= :start
+                               COALESCE(MAX(num_gpus), 1) AS w,
+                               SUM(COALESCE(dph_total, 0) * MIN(COALESCE(dt, 0), :cap)) / 3600.0 AS cost
+                          FROM (
+                                SELECT COALESCE(label, :unlabeled) AS label,
+                                       instance_id, ts, gpu_util, cpu_util, dph_total,
+                                       vram_used_gb, vram_total_gb, num_gpus,
+                                       CAST((ts - :start) / :bucket AS INTEGER) AS b,
+                                       LEAD(ts) OVER (PARTITION BY instance_id ORDER BY ts) - ts AS dt
+                                  FROM samples
+                                 WHERE ts >= :start
+                               )
                       GROUP BY instance_id, b
                        )
               GROUP BY label, b
               ORDER BY label, b
                 """,
-                {"start": start, "bucket": bucket_s, "unlabeled": UNLABELED},
+                {"start": start, "bucket": bucket_s, "unlabeled": UNLABELED, "cap": cap},
             ).fetchall()
 
         series: dict[str, list[dict]] = {}
@@ -386,6 +405,7 @@ class Store:
                     "gpu_util": row["gpu_util"],
                     "cpu_util": row["cpu_util"],
                     "dph_total": row["dph_total"],
+                    "cost": row["cost"],
                     # Pooled, not averaged: a branch's VRAM pressure is the
                     # total it is holding over the total it was given, so a
                     # nearly-full worker is not hidden by an empty one.

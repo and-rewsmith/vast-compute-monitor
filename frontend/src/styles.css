@@ -362,3 +362,9 @@ body {
 /* CPU is one pool shared by every GPU on the box, so its trace stays
    instance-level and spans the full card width. */
 .inst-sparks.single { grid-template-columns: 1fr; }
+
+/* Spend keys name every branch, so they wrap as a list of labelled items
+   rather than a single caption. */
+.spend-key { gap: 4px 14px; }
+.key-item { display: inline-flex; align-items: center; gap: 6px; }
+.key-item .key-swatch { margin-left: 0; }
