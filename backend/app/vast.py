@@ -22,6 +22,10 @@ from pathlib import Path
 import httpx
 
 API_BASE = os.environ.get("VAST_API_BASE", "https://console.vast.ai/api/v0")
+# Vast deprecated GET /api/v0/instances/ (returns 410 "deprecated_endpoint" ->
+# "Use /api/v1/instances/ instead"); /users/current/ is still v0. Derive the v1
+# base from whatever API_BASE is so a VAST_API_BASE override still works.
+API_BASE_V1 = API_BASE.replace("/api/v0", "/api/v1")
 KEY_FILE = Path(os.environ.get("VAST_API_KEY_FILE", Path.home() / ".config/vastai/vast_api_key"))
 
 # Vast's cumulative billed-traffic counters are in KILOBYTES. This is not
@@ -299,7 +303,7 @@ class VastClient:
         """
         now = time.time()
         try:
-            resp = self._client.get(f"{API_BASE}/instances/")
+            resp = self._client.get(f"{API_BASE_V1}/instances/")
         except httpx.HTTPError as exc:
             # JUSTIFICATION FOR NO FAIL-FAST:
             # Vast's API being briefly unreachable is an expected operating
