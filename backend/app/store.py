@@ -52,7 +52,17 @@ SERIES_COLUMNS = (
 #                after the instance is destroyed and its meta row goes stale.
 #   num_gpus  -- the weight for averaging utilization across a branch. A 2-GPU
 #                worker at 90% and a 1-GPU worker at 30% is not a 60% branch.
-EXTRA_COLUMNS = (("label", "TEXT"), ("num_gpus", "REAL"))
+#   api_gpu_util / gpu_util_src -- `gpu_util` holds the AUTHORITATIVE reading,
+#                which is the per-GPU nvidia-smi probe (mean across the
+#                instance's cards) whenever one was fresh, and Vast's own figure
+#                otherwise. The raw Vast figure is kept alongside so the two can
+#                always be compared, and the source is recorded per row.
+EXTRA_COLUMNS = (
+    ("label", "TEXT"),
+    ("num_gpus", "REAL"),
+    ("api_gpu_util", "REAL"),
+    ("gpu_util_src", "TEXT"),
+)
 
 # A gap longer than this many poll intervals is not charged when integrating
 # cost. The poller being down is not evidence the instance was up, and silently
@@ -102,6 +112,9 @@ CREATE TABLE IF NOT EXISTS gpu_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_gpu_samples ON gpu_samples(instance_id, gpu_index, ts);
 CREATE INDEX IF NOT EXISTS idx_gpu_samples_ts ON gpu_samples(ts);
+-- Joined on (instance_id, ts) to pair each instance sample with the probe
+-- readings taken in the same poll; both are written with the same timestamp.
+CREATE INDEX IF NOT EXISTS idx_gpu_samples_inst_ts ON gpu_samples(instance_id, ts);
 
 -- Account-level ground truth, sampled on its own (slower) cadence.
 CREATE TABLE IF NOT EXISTS account (
@@ -145,6 +158,28 @@ class Store:
                 self._db.execute(f"ALTER TABLE samples ADD COLUMN {name} {decl}")
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_samples_label_ts ON samples(label, ts)")
 
+        # One-time backfill: rows written before the probe became authoritative
+        # hold Vast's figure in gpu_util. Vast's per-instance number is not
+        # trustworthy -- instance 50537084 reported 0.0% at a plausible 22 C for
+        # hours while nvidia-smi showed all four cards at 99%, and every other
+        # instance had ticks off by more than 25 points. Where a probe reading
+        # was taken in the same poll it replaces the API figure; the original
+        # is preserved in api_gpu_util. Keyed on gpu_util_src IS NULL, so it
+        # runs once per row and never re-reads a probe value as an API one.
+        probe_mean = (
+            "(SELECT AVG(g.util) FROM gpu_samples g "
+            "WHERE g.instance_id = samples.instance_id AND g.ts = samples.ts)"
+        )
+        self._db.execute(
+            f"""
+            UPDATE samples
+               SET api_gpu_util = gpu_util,
+                   gpu_util_src = CASE WHEN {probe_mean} IS NOT NULL THEN 'probe' ELSE 'api' END,
+                   gpu_util     = COALESCE({probe_mean}, gpu_util)
+             WHERE gpu_util_src IS NULL
+            """
+        )
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
@@ -153,7 +188,10 @@ class Store:
 
     def write(self, ts: float, records: list[dict]) -> None:
         """Append one sample row per instance, and upsert its metadata."""
-        cols = ("ts", "instance_id", "is_running", *SERIES_COLUMNS, "label", "num_gpus")
+        cols = (
+            "ts", "instance_id", "is_running", *SERIES_COLUMNS,
+            "label", "num_gpus", "api_gpu_util", "gpu_util_src",
+        )
         placeholders = ", ".join("?" for _ in cols)
         rows = [
             (
@@ -163,6 +201,8 @@ class Store:
                 *(r.get(c) for c in SERIES_COLUMNS),
                 r.get("label"),
                 r.get("num_gpus"),
+                r.get("api_gpu_util"),
+                r.get("gpu_util_src"),
             )
             for r in records
         ]

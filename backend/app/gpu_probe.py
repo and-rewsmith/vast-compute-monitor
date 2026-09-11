@@ -285,6 +285,41 @@ class GpuProbe:
             for gone in set(self._state) - live:
                 del self._state[gone]
 
+    def probe_sync(self, instances: list[dict], timeout: float) -> None:
+        """Probe every running instance and WAIT for the results.
+
+        Used once, on the first poll after startup. The cache is in-memory, so
+        a fresh process has no readings, and the normal fire-and-forget probe
+        would leave that first poll to fall back to Vast's own figure -- which
+        for some hosts is flatly wrong (instance 50537084 reads 0.0% while its
+        four cards run at 99%). One such tick drew a spike to zero on the chart
+        at every restart. Waiting here, bounded by `timeout`, closes that hole.
+        """
+        if not self.available:
+            return
+        futures = []
+        for inst in instances:
+            host, port = inst.get("ssh_host"), inst.get("ssh_port")
+            if not inst.get("is_running") or not host or not port:
+                # JUSTIFICATION FOR NO FAIL-FAST:
+                # Same as probe(): an instance with no SSH endpoint yet is not
+                # probeable, which is expected during boot, not an error.
+                continue
+            futures.append(self._pool.submit(self._probe_one, int(inst["id"]), host, int(port)))
+        deadline = time.time() + timeout
+        for f in futures:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                f.result(timeout=remaining)
+            except Exception:  # noqa: BLE001
+                # JUSTIFICATION FOR NO FAIL-FAST:
+                # _probe_one records its own failures in the per-instance state;
+                # a probe that times out here just means that instance falls back
+                # to Vast's figure for this one tick, same as before this fix.
+                pass
+
     def merge(self, instances: list[dict]) -> None:
         """Attach the cached per-GPU readings to each instance record."""
         reason = self.unavailable_reason()

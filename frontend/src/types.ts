@@ -34,9 +34,14 @@ export interface Instance {
   gpu_name: string | null;
   num_gpus: number;
   gpu_frac: number | null;
-  // null when the host did not report this tick -- NOT the same as 0. See the
-  // staleness note in vast.py; charts draw a gap rather than a fake zero.
+  // Authoritative GPU utilization: the per-GPU probe's mean across this
+  // instance's cards when a fresh reading exists, Vast's figure otherwise.
+  // null when neither has a reading this tick -- NOT the same as 0.
   gpu_util: number | null;
+  // Vast's own figure, kept for comparison. It is not trusted to drive charts:
+  // one host reported 0% for hours while its four cards ran at 99%.
+  api_gpu_util?: number | null;
+  gpu_util_src?: "probe" | "api";
   gpu_temp_c: number | null;
   gpu_reporting: boolean;
   // Per-GPU breakdown; empty when the probe could not reach the instance.

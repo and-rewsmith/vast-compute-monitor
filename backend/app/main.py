@@ -47,6 +47,16 @@ STATIC_DIR = Path(os.environ.get("VASTMON_STATIC", REPO_ROOT / "frontend/dist"))
 # still retries a couple of times a minute once Vast comes back.
 MAX_BACKOFF = 120.0
 
+# A per-GPU probe reading older than this is not trusted over Vast's own
+# figure. The probe retains its last good reading while an instance refuses
+# SSH, which is right for display, but a card's utilization from five minutes
+# ago should not overrule a current number from anywhere.
+PROBE_FRESH_S = float(os.environ.get("VASTMON_PROBE_FRESH_S", "120"))
+
+# How long the first poll after startup waits for the per-GPU probe to warm up
+# before writing. Bounded so an unreachable fleet cannot stall startup.
+PROBE_WARMUP_S = float(os.environ.get("VASTMON_PROBE_WARMUP_S", "20"))
+
 # The account endpoint is polled on every Nth instance poll. Spend moves slowly
 # and predictably compared to utilization, so there is no reason to double our
 # request rate against a rate-limited API to watch it.
@@ -57,6 +67,35 @@ ACCOUNT_EVERY = int(os.environ.get("VASTMON_ACCOUNT_EVERY", "2"))
 # which jumps the moment an instance is created or destroyed, and extrapolating
 # a week from a value thirty seconds old is extrapolating from noise.
 TRAILING_BURN_S = float(os.environ.get("VASTMON_TRAILING_BURN_S", str(3 * 3600)))
+
+
+def prefer_probe_util(instances: list[dict]) -> None:
+    """Make the nvidia-smi probe the authoritative GPU utilization.
+
+    Vast's per-instance `gpu_util` is not reliable enough to drive the charts:
+    instance 50537084 reported 0.0% at a plausible 22 C for hours while all four
+    of its cards were at 99%, and across the fleet many individual polls were
+    off by more than 25 points. Because 22 C looks like a real idle GPU, the
+    existing zero-temperature staleness check cannot catch it. The probe reads
+    the cards themselves, so wherever it has a fresh reading its mean across the
+    instance's cards replaces the API figure -- and every consumer downstream
+    (fleet averages, the branch rail, stored history, the charts) inherits it.
+    The raw API value is kept as `api_gpu_util` and the source is recorded.
+    """
+    for inst in instances:
+        inst["api_gpu_util"] = inst.get("gpu_util")
+        probe = inst.get("gpu_probe") or {}
+        age = probe.get("age_s")
+        utils = [g["util"] for g in inst.get("gpus") or [] if g.get("util") is not None]
+        if utils and age is not None and age <= PROBE_FRESH_S:
+            inst["gpu_util"] = sum(utils) / len(utils)
+            inst["gpu_util_src"] = "probe"
+        else:
+            # JUSTIFICATION FOR NO FAIL-FAST:
+            # No fresh probe reading is an expected state -- an instance still
+            # booting, or one refusing SSH -- not an error. Vast's own figure is
+            # the only number available, so it is used and labelled as such.
+            inst["gpu_util_src"] = "api"
 
 
 def fleet_summary(instances: list[dict]) -> dict:
@@ -181,6 +220,9 @@ async def _poll_loop() -> None:
     assert store is not None and client is not None
     failures = 0
     tick = 0
+    # Set after the first SUCCESSFUL poll warms the probe; a failed first poll
+    # must not skip the warm-up for the life of the process.
+    warmed = False
     while True:
         instances, error = await asyncio.to_thread(client.fetch)
         now = time.time()
@@ -207,7 +249,13 @@ async def _poll_loop() -> None:
             # the probe has cached, then kick off the next round. The API
             # snapshot is never delayed by an unreachable box.
             if probe is not None:
+                if not warmed:
+                    # First successful poll of this process: warm the cache so
+                    # it does not fall back to Vast's figure (see probe_sync).
+                    await asyncio.to_thread(probe.probe_sync, instances, PROBE_WARMUP_S)
+                    warmed = True
                 probe.merge(instances)
+                prefer_probe_util(instances)
                 probe.probe(instances)
             await asyncio.to_thread(store.write, now, instances)
             await asyncio.to_thread(store.write_gpus, now, instances)

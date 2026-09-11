@@ -98,9 +98,17 @@ key discovery with a comma-separated list; `VASTMON_SSH_USER` (default `root`),
 `/api/info` reports whether the probe is available, why not, and which keys it
 is offering.
 
-The top-of-page utilization charts and the branch rail still use Vast's
-per-instance numbers, so a fleet-level average there can differ from the
-per-GPU detail on the cards below.
+**The probe is the authoritative GPU utilization everywhere** — the charts,
+the branch rail, the table and stored history all read it, with Vast's figure
+used only when no fresh probe reading exists. Vast's number is not trustworthy
+enough to drive a chart: instance `50537084` reported **0.0% at a plausible
+22°C** for hours while all four of its cards ran at 99%, and because 22°C looks
+like a real idle GPU the zero-temperature staleness check could not catch it.
+Across the fleet, individual polls were routinely off by more than 25 points.
+Vast's raw figure is kept in `api_gpu_util` for comparison, and every stored row
+records its source in `gpu_util_src`. The probe is warmed synchronously on the
+first poll after startup, so a restart does not write a tick of Vast's figure
+into the chart.
 
 ## Actual versus projected
 
