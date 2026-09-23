@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { Instance } from "../types";
+import type { Instance, InstanceId } from "../types";
 import { duration, pct, rate, usd } from "../format";
 
 // GPU utilization for the table, taken from the SAME source as the instance
@@ -21,12 +21,13 @@ function gpuUtilFor(inst: Instance): { value: number | null; probed: boolean } {
 }
 
 type Key =
-  | "label" | "id" | "status" | "gpu_name" | "gpu_util" | "cpu_util" | "ram_percent"
+  | "label" | "provider" | "id" | "status" | "gpu_name" | "gpu_util" | "cpu_util" | "ram_percent"
   | "vram_percent" | "disk_percent" | "net_recv_bps" | "dph_total"
   | "uptime_s" | "geolocation";
 
 const COLUMNS: { key: Key; label: string; num: boolean }[] = [
   { key: "label", label: "Branch", num: false },
+  { key: "provider", label: "Cloud", num: false },
   { key: "id", label: "ID", num: false },
   { key: "status", label: "Status", num: false },
   { key: "gpu_name", label: "GPU", num: false },
@@ -50,7 +51,7 @@ export function InstanceTable({
   branchOf,
 }: {
   instances: Instance[];
-  colorFor: (id: number) => string;
+  colorFor: (id: InstanceId) => string;
   branchOf: (inst: Instance) => string;
 }) {
   const [sort, setSort] = useState<Key>("label");
@@ -115,7 +116,14 @@ export function InstanceTable({
                   <span className="row-key" style={{ background: colorFor(i.id) }} />
                   {branchOf(i)}
                 </td>
-                <td className="mono muted">{i.id}</td>
+                <td>
+                  {/* Records written before the EC2 source existed have no
+                      provider and are all Vast. */}
+                  <span className={`pill ${i.provider === "ec2" ? "ec2" : "vast"}`}>
+                    {i.provider === "ec2" ? (i.spot ? "ec2 spot" : "ec2") : "vast"}
+                  </span>
+                </td>
+                <td className="mono muted" title={i.instance_type ?? ""}>{i.id}</td>
                 <td>
                   <span className={`pill ${i.is_running ? "ok" : "off"}`}>{i.status}</span>
                 </td>
@@ -129,7 +137,9 @@ export function InstanceTable({
                       ? (i.gpus ?? [])
                           .map((g) => `GPU ${g.index}: ${g.util == null ? "—" : `${Math.round(g.util)}%`}`)
                           .join("  ·  ")
-                      : "No per-GPU probe data; showing Vast's own averaged figure."
+                      : i.provider === "ec2"
+                        ? "No per-GPU CloudWatch data for this box."
+                        : "No per-GPU probe data; showing Vast's own averaged figure."
                   }
                 >
                   {(() => {
@@ -147,7 +157,13 @@ export function InstanceTable({
                 <td className="num">{pct(i.ram_percent)}</td>
                 <td className="num">{pct(i.disk_percent)}</td>
                 <td className="num">{rate(i.net_recv_bps)}</td>
-                <td className="num">{usd(i.dph_total)}</td>
+                <td
+                  className="num"
+                  title={i.dph_estimated ? "Live spot price: billed at the market rate, so this drifts" : ""}
+                >
+                  {usd(i.dph_total)}
+                  {i.dph_estimated ? <span className="muted"> ~</span> : null}
+                </td>
                 <td className="num">{duration(i.uptime_s)}</td>
                 <td className="loc" title={i.geolocation ?? ""}>{i.geolocation ?? "—"}</td>
               </tr>

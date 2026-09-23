@@ -10,7 +10,7 @@ import {
   useSpend,
   type GroupMode,
 } from "./api/useVast";
-import type { BranchPoint, HistoryPoint, Instance } from "./types";
+import type { BranchPoint, HistoryPoint, Instance, InstanceId } from "./types";
 import { ago, gb, pct, seriesColor, usd } from "./format";
 import { TimeChart, type ChartSeries } from "./components/TimeChart";
 import { Legend } from "./components/Legend";
@@ -80,7 +80,7 @@ export default function App() {
   }, [liveBranches, branchCosts, branchHistory.history, spend]);
 
   const colorForBranch = useBranchColors(branchNames);
-  const colorForInstance = (id: number) => {
+  const colorForInstance = (id: InstanceId) => {
     const inst = instances.find((i) => i.id === id);
     return colorForBranch(inst ? branchOf(inst) : UNLABELED);
   };
@@ -106,12 +106,17 @@ export default function App() {
         }));
     }
     const series = instHistory.history?.series ?? {};
-    const ids = new Set<number>(instances.map((i) => i.id));
-    for (const k of Object.keys(series)) ids.add(Number(k));
+    // History arrives keyed by the string form of the id. Coercing those keys
+    // with Number() is fine for a Vast id and silently destroys an EC2 one --
+    // Number("i-0abc") is NaN, so the box would drop out of the per-instance
+    // charts entirely. Compare as strings and keep the key as it came.
+    const ids = new Set<InstanceId>(instances.map((i) => i.id));
+    const seen = new Set([...ids].map(String));
+    for (const k of Object.keys(series)) if (!seen.has(k)) ids.add(k);
     return [...ids]
-      .sort((a, b) => a - b)
+      .sort((a, b) => String(a).localeCompare(String(b)))
       .map((id) => {
-        const inst = instances.find((i) => i.id === id);
+        const inst = instances.find((i) => String(i.id) === String(id));
         return {
           key: String(id),
           label: inst ? `${id} - ${branchOf(inst)}` : String(id),
@@ -232,6 +237,17 @@ export default function App() {
         <div className="banner">
           <strong>Vast API unreachable</strong> - {snapshot.error}. Showing the last good data
           {snapshot.stale_since ? `, from ${ago(now - snapshot.stale_since)}` : ""}.
+        </div>
+      )}
+
+      {/* Separate from the Vast banner on purpose: one cloud being unreachable
+          says nothing about the other, and an EC2 box that has dropped off the
+          board because a credential expired must not read as a box that was
+          shut down. The message names the command that fixes it. */}
+      {snapshot?.aws_error && (
+        <div className="banner">
+          <strong>AWS not readable</strong> - {snapshot.aws_error}. EC2 boxes are missing from
+          the board until this is fixed; Vast is unaffected.
         </div>
       )}
 

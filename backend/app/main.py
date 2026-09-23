@@ -26,6 +26,10 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .aws import PROFILE as AWS_PROFILE
+from .aws import REGION as AWS_REGION
+from .aws import AwsClient
+from .aws import available as aws_available
 from .gpu_probe import GpuProbe
 from .store import UNLABELED, Store
 from .vast import VastClient, load_api_key
@@ -62,6 +66,12 @@ PROBE_WARMUP_S = float(os.environ.get("VASTMON_PROBE_WARMUP_S", "20"))
 # request rate against a rate-limited API to watch it.
 ACCOUNT_EVERY = int(os.environ.get("VASTMON_ACCOUNT_EVERY", "2"))
 
+# EC2 is polled on every Nth tick, for two reasons that both point the same way:
+# its telemetry is published to CloudWatch once a minute, so a faster poll only
+# re-reads the same datapoint, and GetMetricData is billed per metric requested.
+# The last good EC2 fleet is carried across the ticks in between.
+AWS_EVERY = int(os.environ.get("VASTMON_AWS_EVERY", "2"))
+
 # Trailing window used to characterise realized burn. Projections are built from
 # this, never from the instantaneous sum of dph: that sum is a step function
 # which jumps the moment an instance is created or destroyed, and extrapolating
@@ -83,6 +93,12 @@ def prefer_probe_util(instances: list[dict]) -> None:
     The raw API value is kept as `api_gpu_util` and the source is recorded.
     """
     for inst in instances:
+        # EC2 records arrive with their utilization already sourced from
+        # CloudWatch (gpu_util_src="cwagent") and are never SSH-probed, so the
+        # probe-versus-API question this function settles does not arise for
+        # them -- and answering it anyway would relabel a good reading "api".
+        if inst.get("provider") == "ec2":
+            continue
         inst["api_gpu_util"] = inst.get("gpu_util")
         probe = inst.get("gpu_probe") or {}
         age = probe.get("age_s")
@@ -169,7 +185,10 @@ def live_branches(instances: list[dict]) -> list[dict]:
                 "gpus": sum(m["num_gpus"] for m in running),
                 "dph_total": sum(m["dph_total"] or 0.0 for m in members),
                 "gpu_util": (num / den) if den else None,
-                "ids": sorted(m["id"] for m in members),
+                # Vast ids are ints and EC2 ids are strings ("i-0abc..."),
+                # so the key is explicit: sorting them raw is a TypeError the
+                # moment one branch holds boxes from both providers.
+                "ids": sorted((m["id"] for m in members), key=str),
                 "started": min((m["start_date"] or 0.0) for m in members) or None,
             }
         )
@@ -214,18 +233,34 @@ hub = Hub()
 store: Store | None = None
 client: VastClient | None = None
 probe: GpuProbe | None = None
+aws: AwsClient | None = None
 
 
 async def _poll_loop() -> None:
     assert store is not None and client is not None
     failures = 0
     tick = 0
+    # Last good EC2 fleet, carried between AWS ticks. A blank here would make
+    # boxes blink out of the charts on every other poll.
+    aws_records: list[dict] = []
+    aws_error: str | None = None
     # Set after the first SUCCESSFUL poll warms the probe; a failed first poll
     # must not skip the warm-up for the life of the process.
     warmed = False
     while True:
         instances, error = await asyncio.to_thread(client.fetch)
         now = time.time()
+
+        # ---- EC2, on its own cadence -------------------------------------
+        # Kept independent of the Vast result: one provider being down is not a
+        # reason to stop reporting the other, and the two failure messages are
+        # reported separately so "which cloud is broken" is never a guess.
+        if aws is not None and tick % AWS_EVERY == 0:
+            fetched, aws_error = await asyncio.to_thread(aws.fetch)
+            if aws_error is None:
+                aws_records = fetched
+            elif not aws_records:
+                aws_records = []
 
         # Account/spend counter on a slower cadence than utilization.
         if tick % ACCOUNT_EVERY == 0:
@@ -245,18 +280,26 @@ async def _poll_loop() -> None:
 
         if error is None:
             failures = 0
+            for inst in instances:
+                inst.setdefault("provider", "vast")
             # Per-GPU telemetry is collected out-of-band over SSH; merge whatever
             # the probe has cached, then kick off the next round. The API
             # snapshot is never delayed by an unreachable box.
             if probe is not None:
+                # EC2 boxes are excluded here, not inside the probe: an EGTO box
+                # terminates itself after 30 idle minutes only if nobody is
+                # logged in, and the probe holds an SSH master open. Probing
+                # them would keep idle boxes alive and billing.
+                probeable = [i for i in instances if i.get("provider") != "ec2"]
                 if not warmed:
                     # First successful poll of this process: warm the cache so
                     # it does not fall back to Vast's figure (see probe_sync).
-                    await asyncio.to_thread(probe.probe_sync, instances, PROBE_WARMUP_S)
+                    await asyncio.to_thread(probe.probe_sync, probeable, PROBE_WARMUP_S)
                     warmed = True
-                probe.merge(instances)
+                probe.merge(probeable)
                 prefer_probe_util(instances)
-                probe.probe(instances)
+                probe.probe(probeable)
+            instances = instances + aws_records
             await asyncio.to_thread(store.write, now, instances)
             await asyncio.to_thread(store.write_gpus, now, instances)
             payload = {
@@ -267,6 +310,7 @@ async def _poll_loop() -> None:
                 "branches": live_branches(instances),
                 "account": hub.account,
                 "error": None,
+                "aws_error": aws_error,
                 "interval": POLL_INTERVAL,
             }
         else:
@@ -283,6 +327,7 @@ async def _poll_loop() -> None:
                 "branches": prev.get("branches", []),
                 "account": hub.account,
                 "error": error,
+                "aws_error": aws_error,
                 "stale_since": prev.get("stale_since") or prev.get("ts") or now,
                 "interval": POLL_INTERVAL,
             }
@@ -297,13 +342,17 @@ async def _poll_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global store, client, probe
+    global store, client, probe, aws
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     store = Store(DB_PATH, retention_days=RETENTION_DAYS, interval=POLL_INTERVAL)
     # Constructed here rather than lazily so a missing/invalid API key fails the
     # service at startup, loudly, instead of showing an empty dashboard forever.
     client = VastClient()
     probe = GpuProbe()
+    # Unlike the Vast client this is NOT allowed to fail startup: AWS access
+    # rides an SSO session that expires daily by design, so "no credentials" is
+    # a routine state the dashboard reports, not a reason to refuse to run.
+    aws = AwsClient()
     task = asyncio.create_task(_poll_loop())
     try:
         yield
@@ -335,6 +384,13 @@ async def info() -> JSONResponse:
                 "available": probe.available if probe else False,
                 "reason": probe.unavailable_reason() if probe else "not started",
                 "keys": [k.split("/")[-1] for k in probe.keys] if probe else [],
+            },
+            "aws": {
+                "enabled": aws_available()[0],
+                "reason": aws_available()[1],
+                "region": AWS_REGION,
+                "profile": AWS_PROFILE,
+                "error": (hub.latest or {}).get("aws_error"),
             },
         }
     )
