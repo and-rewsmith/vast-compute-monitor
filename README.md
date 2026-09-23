@@ -21,7 +21,9 @@ every 30s and keeps the history on disk.
 ```
 
 The service only needs outbound HTTPS, so it can run anywhere — it does **not**
-have to be near the GPUs it watches.
+have to be near the GPUs it watches. Since the EC2 source was added it polls two
+providers on that one socket: Vast's API, and AWS EC2 + CloudWatch through the
+`aws` CLI. See "The EC2 side" below.
 
 ## What it shows
 
@@ -110,6 +112,62 @@ records its source in `gpu_util_src`. The probe is warmed synchronously on the
 first poll after startup, so a restart does not write a tick of Vast's figure
 into the chart.
 
+## The EC2 side (AWS)
+
+GPU boxes are rented in two places, so the board shows both. The EGTO AWS
+account launches every box from one template tagged `project=egto`, so a single
+`describe-instances` filtered on that tag is the fleet — the same listing
+`egq box ls --fleet` shows. Field-for-field the mapping follows
+`box_record_from_instance` in egq's `egq_aws.py`, so the two tools agree on what
+a box *is*, and everything downstream (store, websocket, charts, spend) is
+provider-agnostic: one normalized record with `provider` saying where it came
+from.
+
+Three things differ from Vast and shape `backend/app/aws.py`:
+
+**Telemetry is a second call.** Vast returns live utilization in the same
+response as the instance list; EC2 does not. The numbers come from CloudWatch,
+published by the CloudWatch agent every 60s in the `CWAgent` namespace,
+dimensioned by `InstanceId` and — for the nvidia metrics — by GPU `index`, which
+is what makes the per-GPU blocks work here too. Metric *names* are discovered
+per box with `list-metrics` rather than assumed, because they depend on the
+agent's config. On the current boxes the agent publishes `utilization_gpu`,
+`memory_used` and `memory_total`, but **not** temperature or power, so those
+dials are blank on an EC2 card — a gap, never a zero. CPU and network come from
+`AWS/EC2` itself and so survive a box whose agent is not up yet; `NetworkIn`/
+`NetworkOut` are bytes per 300s period and are divided down to a rate.
+
+**These boxes are never SSH-probed.** An EGTO box terminates itself after 30
+idle minutes only if *nobody is logged in*, and the per-GPU probe holds an SSH
+master connection open (`ControlPersist`). Probing EC2 would quietly keep idle
+boxes alive and billing — the exact failure this dashboard exists to expose — so
+`gpu_probe.py` is handed only the Vast half of the fleet. The instance id is
+still recorded as `ssh_host` for a human to copy (`~/.ssh/config` routes
+`Host i-*` through Session Manager); nothing in this process connects.
+
+**There is no long-lived credential, by policy.** The account's deny list blocks
+`iam:CreateAccessKey`, so a 24/7 poller cannot hold a key of its own: it rides
+the operator's SSO session, which expires daily. That is reported, not hidden —
+the banner names the command (`aws sso login --profile me`) and says Vast is
+unaffected. While it is expired, EC2 boxes are missing from the board and their
+history has a hole; the one machine with a non-expiring identity is `egq-host`
+(instance profile), so a collector that must stay correct through a logged-out
+night belongs there, with the Mac as a reader.
+
+Cost is per-provider honest. On-demand comes from a small table of us-east-1
+prices; spot is the **live** market price for the box's type and zone, which is
+what it is billed at — so it drifts, and any cumulative figure built on it is an
+estimate. Those records carry `dph_estimated`, and the table marks them `~`. A
+stopped box's EBS cost is not counted (boxes terminate rather than stop, so this
+is rare). Polling is billed too: `GetMetricData` is charged per metric, so only
+running boxes are read, only the metrics above, at most once a minute.
+
+Environment: `VASTMON_AWS=0` disables the source entirely, `VASTMON_AWS_PROFILE`
+(default `me`) and `VASTMON_AWS_REGION` select the account, `VASTMON_AWS_EVERY`
+sets how many Vast polls pass between EC2 polls (default 2), and
+`VASTMON_AWS_LABEL_TAG` forces one tag as the branch key instead of the default
+order (`agent`, then `Name`, then a shortened `repo_ref`).
+
 ## Actual versus projected
 
 Two independent spend signals are tracked, and they are never mixed:
@@ -172,6 +230,11 @@ The API key is read from `VAST_API_KEY`, else `~/.config/vastai/vast_api_key` �
 the file the `vastai` CLI already writes, so a logged-in machine needs no setup.
 The key never leaves the backend; `/api/info` exposes only its last six
 characters, as a fingerprint. Nothing secret is committed.
+
+AWS is not given a credential at all: the `aws` CLI is invoked with the
+operator's own profile (`VASTMON_AWS_PROFILE`, default `me`) and inherits
+whatever SSO session that has. No key is read, stored or logged by this service,
+and an expired session degrades the EC2 half only — see "The EC2 side" above.
 
 ## Development
 

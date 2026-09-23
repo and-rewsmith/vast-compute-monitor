@@ -81,6 +81,11 @@ UNLABELED = "(unlabeled)"
 MIN_BURN_DT = 300.0
 
 SCHEMA = f"""
+-- instance_id keeps INTEGER affinity for the Vast ids that filled this table
+-- first, but it also holds EC2 ids ("i-0abc..."): SQLite converts text in an
+-- INTEGER-affinity column only when the conversion is lossless, so those are
+-- stored, indexed and compared as the strings they are. Ids are never mixed
+-- within one provider, so a lookup always matches the type it wrote.
 CREATE TABLE IF NOT EXISTS samples (
   ts           REAL    NOT NULL,
   instance_id  INTEGER NOT NULL,
@@ -90,8 +95,12 @@ CREATE TABLE IF NOT EXISTS samples (
 CREATE INDEX IF NOT EXISTS idx_samples_inst_ts ON samples(instance_id, ts);
 CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts);
 
+-- `id` is deliberately typeless: INTEGER PRIMARY KEY is an alias for the rowid
+-- and REJECTS a non-integer key, so an EC2 id would raise "datatype mismatch"
+-- on the first EC2 box. No declared type means BLOB affinity -- no conversion
+-- either way, so existing Vast ids stay integers and stay joinable.
 CREATE TABLE IF NOT EXISTS instances (
-  id          INTEGER PRIMARY KEY,
+  id          PRIMARY KEY,
   first_seen  REAL NOT NULL,
   last_seen   REAL NOT NULL,
   meta        TEXT NOT NULL
@@ -157,6 +166,29 @@ class Store:
             if name not in have:
                 self._db.execute(f"ALTER TABLE samples ADD COLUMN {name} {decl}")
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_samples_label_ts ON samples(label, ts)")
+
+        # `instances.id` was INTEGER PRIMARY KEY, which is the rowid alias and
+        # accepts integers only -- the first EC2 box ("i-0abc...") would fail
+        # the upsert with "datatype mismatch" and take the whole poll's write
+        # with it. Rebuild it typeless (BLOB affinity: no coercion in either
+        # direction), preserving every existing row and its integer key.
+        idcol = next((r for r in self._db.execute("PRAGMA table_info(instances)")
+                      if r["name"] == "id"), None)
+        if idcol is not None and (idcol["type"] or "").upper() == "INTEGER":
+            self._db.executescript(
+                """
+                CREATE TABLE instances_rebuilt (
+                  id          PRIMARY KEY,
+                  first_seen  REAL NOT NULL,
+                  last_seen   REAL NOT NULL,
+                  meta        TEXT NOT NULL
+                );
+                INSERT INTO instances_rebuilt (id, first_seen, last_seen, meta)
+                  SELECT id, first_seen, last_seen, meta FROM instances;
+                DROP TABLE instances;
+                ALTER TABLE instances_rebuilt RENAME TO instances;
+                """
+            )
 
         # One-time backfill: rows written before the probe became authoritative
         # hold Vast's figure in gpu_util. Vast's per-instance number is not

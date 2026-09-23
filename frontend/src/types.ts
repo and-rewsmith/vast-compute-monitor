@@ -21,10 +21,23 @@ export interface GpuProbeStatus {
   ok: boolean;
   error: string | null;
   age_s: number | null;
+  // "cloudwatch" on EC2 boxes, which are never SSH-probed; absent on Vast,
+  // where the reading always comes from nvidia-smi over SSH.
+  source?: "cloudwatch";
 }
 
+// Vast numbers its instances; EC2 names them ("i-0abc..."). Both are keys, and
+// neither is arithmetic, so everything that sorts, compares or keys on one goes
+// through String() rather than assuming a number.
+export type InstanceId = number | string;
+
 export interface Instance {
-  id: number;
+  // Vast ids are numeric; EC2 ids are strings ("i-0abc..."). Anything that
+  // sorts or keys on this must say which, rather than relying on the runtime.
+  id: number | string;
+  // Which cloud this box is rented from. Absent on records written before the
+  // EC2 source existed, which are all Vast.
+  provider?: "vast" | "ec2";
   label: string | null;
   status: string;
   intended_status: string | null;
@@ -41,7 +54,9 @@ export interface Instance {
   // Vast's own figure, kept for comparison. It is not trusted to drive charts:
   // one host reported 0% for hours while its four cards ran at 99%.
   api_gpu_util?: number | null;
-  gpu_util_src?: "probe" | "api";
+  // "probe": nvidia-smi over SSH (Vast). "cwagent": the CloudWatch agent on the
+  // box (EC2). "api": the provider's own figure. "none": nothing reported.
+  gpu_util_src?: "probe" | "api" | "cwagent" | "none";
   gpu_temp_c: number | null;
   gpu_reporting: boolean;
   // Per-GPU breakdown; empty when the probe could not reach the instance.
@@ -55,6 +70,18 @@ export interface Instance {
   compute_cap: number | null;
   total_flops: number | null;
   dlperf: number | null;
+
+  // --- EC2 only -----------------------------------------------------------
+  instance_type?: string | null;
+  spot?: boolean;
+  zone?: string | null;
+  aws_owner?: string | null;
+  agent?: string | null;
+  repo_ref?: string | null;
+  short_ref?: string | null;
+  // True when $/hr is the live spot price rather than a fixed rate: the box is
+  // billed at whatever the market does next, so cumulative spend is an estimate.
+  dph_estimated?: boolean;
 
   cpu_name: string | null;
   cpu_cores: number | null;
@@ -148,6 +175,9 @@ export interface Snapshot {
   branches: Branch[];
   account: Account | null;
   error: string | null;
+  // The EC2 half fails independently of the Vast half -- most often because the
+  // SSO session expired, which happens daily by design.
+  aws_error?: string | null;
   stale_since?: number;
   interval: number;
 }
