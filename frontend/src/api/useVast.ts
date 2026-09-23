@@ -155,7 +155,7 @@ export function useHistory(minutes: number, snapshot: Snapshot | null) {
   return { history, loading, refetch };
 }
 
-export type GroupMode = "branch" | "instance";
+export type GroupMode = "branch" | "instance" | "gpu";
 
 // Per-branch utilization history. Same contract as useHistory (fetch on window
 // change, append live snapshots, periodic refetch to re-form buckets) but keyed

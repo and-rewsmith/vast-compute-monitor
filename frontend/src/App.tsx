@@ -49,7 +49,9 @@ export default function App() {
   const { snapshot, state } = useSnapshot();
   const info = useInfo();
   const [minutes, setMinutes] = useState(60);
-  const [group, setGroup] = useState<GroupMode>("branch");
+  // Default to per-GPU: a multi-GPU box averaged into one line hides exactly the
+  // split this dashboard exists to show, so that is never the first thing shown.
+  const [group, setGroup] = useState<GroupMode>("gpu");
   const [now, setNow] = useState(() => Date.now() / 1000);
 
   const instHistory = useHistory(minutes, snapshot);
@@ -86,7 +88,11 @@ export default function App() {
   const windowLabel = WINDOWS.find((w) => w.minutes === minutes)?.label ?? `${minutes}m`;
   const loading = group === "branch" ? branchHistory.loading : instHistory.loading;
 
-  // Chart series: by branch (default) or by instance.
+  // Chart series for the GPU / VRAM / CPU panels. Grouped three ways:
+  //   branch    one line per branch (its workers pooled)
+  //   instance  one line per instance (its GPUs averaged into one number)
+  //   gpu       one line per PHYSICAL GPU (see gpuLineSeries) -- a 4-GPU box
+  //             draws four lines and is never averaged into a single trace
   const makeSeries = (field: "gpu_util" | "cpu_util" | "vram_percent"): ChartSeries[] => {
     if (group === "branch") {
       const series = branchHistory.history?.series ?? {};
@@ -125,19 +131,55 @@ export default function App() {
       });
   };
 
+  // One line per physical GPU, keyed "<id>:<idx>", from the same per-GPU history
+  // the instance-card sparklines use. This is the whole point of the "gpu"
+  // grouping: Vast's API averages a multi-GPU box into a single number (it
+  // reported 49.5% for a pair of cards actually running 99% and 0%), and this
+  // never does. Colour is by draw order from the categorical palette, NOT by
+  // branch, so sibling GPUs on one box stay distinct rather than overplotting
+  // in one hue.
+  const gpuLineSeries = (metric: "util" | "mem_percent"): ChartSeries[] => {
+    const series = gpuHistory?.series ?? {};
+    return Object.keys(series)
+      .sort((a, b) => {
+        const [ai, ag] = a.split(":").map(Number);
+        const [bi, bg] = b.split(":").map(Number);
+        return ai - bi || ag - bg;
+      })
+      .map((key, i) => {
+        const [idStr, gStr] = key.split(":");
+        const id = Number(idStr);
+        const inst = instances.find((x) => x.id === id);
+        const branch = inst ? branchOf(inst) : String(id);
+        return {
+          key,
+          label: `${id}·g${gStr} - ${branch}`,
+          color: seriesColor(i),
+          points: series[key].map((p) => ({ ts: p.ts, v: p[metric] })),
+        };
+      });
+  };
+
+  // GPU and VRAM honour the "gpu" grouping; CPU never does -- it is one pool
+  // shared by every card on the box, so there is no per-GPU number to split it
+  // into, and it falls back to the per-instance line.
   const gpuSeries = useMemo(
-    () => makeSeries("gpu_util"),
-    [group, branchHistory.history, instHistory.history, instances],
+    () => (group === "gpu" ? gpuLineSeries("util") : makeSeries("gpu_util")),
+    [group, branchHistory.history, instHistory.history, gpuHistory, instances],
   );
   const vramSeries = useMemo(
-    () => makeSeries("vram_percent"),
-    [group, branchHistory.history, instHistory.history, instances],
+    () => (group === "gpu" ? gpuLineSeries("mem_percent") : makeSeries("vram_percent")),
+    [group, branchHistory.history, instHistory.history, gpuHistory, instances],
   );
   const cpuSeries = useMemo(
     () => makeSeries("cpu_util"),
     [group, branchHistory.history, instHistory.history, instances],
   );
-  const legendItems = gpuSeries.map((s) => ({ key: s.key, label: s.label, color: s.color }));
+  // Each panel keys its own legend off its own series -- in "gpu" mode the GPU
+  // and VRAM panels are per-card while CPU stays per-instance, so one shared
+  // legend would mislabel the CPU lines.
+  const legendOf = (s: ChartSeries[]) => s.map((x) => ({ key: x.key, label: x.label, color: x.color }));
+  const noGpuData = group === "gpu" && gpuSeries.length === 0;
 
   const activeHistory = group === "branch" ? branchHistory.history : instHistory.history;
   const chartStart = activeHistory?.start ?? now - minutes * 60;
@@ -214,7 +256,7 @@ export default function App() {
             </div>
             <span className="filter-label">Group by</span>
             <div className="seg">
-              {(["branch", "instance"] as GroupMode[]).map((m) => (
+              {(["branch", "instance", "gpu"] as GroupMode[]).map((m) => (
                 <button
                   key={m}
                   className={`seg-btn${group === m ? " on" : ""}`}
@@ -247,7 +289,13 @@ export default function App() {
                   avg {pct(snapshot.fleet.avg_gpu_util)} across {snapshot.fleet.running} running
                 </span>
               </div>
-              <Legend items={legendItems} />
+              <Legend items={legendOf(gpuSeries)} />
+              {noGpuData && (
+                <div className="muted small" style={{ padding: "2px 0 8px" }}>
+                  No per-GPU probe data in this window yet — the SSH probe may not
+                  have reached these hosts. Switch to “instance” for Vast’s figure.
+                </div>
+              )}
               <TimeChart
                 series={gpuSeries}
                 start={chartStart}
@@ -265,7 +313,12 @@ export default function App() {
                   {gb(snapshot.fleet.vram_used_gb)} / {gb(snapshot.fleet.vram_total_gb)} pooled
                 </span>
               </div>
-              <Legend items={legendItems} />
+              <Legend items={legendOf(vramSeries)} />
+              {noGpuData && (
+                <div className="muted small" style={{ padding: "2px 0 8px" }}>
+                  No per-GPU probe data in this window yet.
+                </div>
+              )}
               <TimeChart
                 series={vramSeries}
                 start={chartStart}
@@ -281,9 +334,10 @@ export default function App() {
                 <span className="card-title">CPU utilization - {windowLabel}</span>
                 <span className="head-right muted small">
                   avg {pct(snapshot.fleet.avg_cpu_util)} across {snapshot.fleet.running} running
+                  {group === "gpu" ? " · per instance" : ""}
                 </span>
               </div>
-              <Legend items={legendItems} />
+              <Legend items={legendOf(cpuSeries)} />
               <TimeChart
                 series={cpuSeries}
                 start={chartStart}
