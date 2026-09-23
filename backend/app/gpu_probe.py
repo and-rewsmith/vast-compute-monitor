@@ -129,7 +129,20 @@ class GpuProbe:
         self._pool = ThreadPoolExecutor(max_workers=PROBE_WORKERS, thread_name_prefix="gpuprobe")
         # Control sockets live in a private temp dir so they are cleaned up with
         # the process and cannot collide with another user's.
-        self._ctl_dir = tempfile.mkdtemp(prefix="vastmon-ssh-")
+        #
+        # The dir is forced under /tmp rather than $TMPDIR: a Unix domain socket
+        # path is capped at ~104 bytes, and macOS's per-user $TMPDIR
+        # (/var/folders/xx/<22 chars>/T/) eats most of that before the
+        # %r@%h:%p socket name is appended -- ssh then fails every probe with
+        # "path ... too long for Unix domain socket" and no per-GPU data is ever
+        # collected. /tmp keeps the prefix short on both macOS and Linux.
+        ctl_base = "/tmp" if os.path.isdir("/tmp") else None
+        self._ctl_dir = tempfile.mkdtemp(prefix="vastmon-ssh-", dir=ctl_base)
+        # Fail fast rather than probe-fail silently for the rest of the process's
+        # life: the longest host:port ssh will append is ~30 bytes.
+        assert len(self._ctl_dir) + 40 < 104, (
+            f"ssh ControlPath base too long for a Unix socket: {self._ctl_dir!r}"
+        )
         self._ssh = shutil.which("ssh")
 
     def close(self) -> None:
